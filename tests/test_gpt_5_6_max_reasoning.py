@@ -19,6 +19,9 @@ CODEX_GPT_5_6_MODELS = (
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
+CODEX_GPT_5_6_900K_MODELS = tuple(
+    f"{model_id}-900k" for model_id in CODEX_GPT_5_6_MODELS
+)
 CODEX_REJECTED_GPT_5_6_PRO_MODELS = (
     "gpt-5.6-sol-pro",
     "gpt-5.6-terra-pro",
@@ -46,6 +49,36 @@ def test_live_codex_gpt_5_6_models_advertise_max(model_id):
     )
 
 
+@pytest.mark.parametrize("model_id", CODEX_GPT_5_6_900K_MODELS)
+def test_codex_900k_context_variants_advertise_and_preserve_max(model_id):
+    assert "max" in cfg.resolve_model_reasoning_efforts(
+        model_id, provider_id="openai-codex"
+    )
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", model_id, provider_id="openai-codex"
+    ) == "max"
+    gateway_cfg = {"agent": {"reasoning_effort": "max"}}
+    assert _gateway_reasoning_effort_for_request(
+        gateway_cfg, model=model_id, model_provider="openai-codex"
+    ) == "max"
+
+
+@pytest.mark.parametrize(
+    "model_id,provider_id",
+    [
+        ("gpt-5.6-luna-900k", "openai"),
+        ("gpt-5.6-luna-pro-900k", "openai-codex"),
+        ("gpt-5.6-nebula-900k", "openai-codex"),
+    ],
+)
+def test_unsupported_900k_aliases_remain_capped_at_xhigh(model_id, provider_id):
+    efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id=provider_id)
+    assert "max" not in efforts
+    assert cfg.coerce_reasoning_effort_for_model(
+        "max", model_id, provider_id=provider_id
+    ) == "xhigh"
+
+
 @pytest.mark.parametrize("model_id", CODEX_REJECTED_GPT_5_6_PRO_MODELS)
 def test_codex_rejected_gpt_5_6_pro_models_do_not_advertise_max(model_id):
     efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id="openai-codex")
@@ -61,6 +94,7 @@ def test_codex_rejected_gpt_5_6_pro_models_do_not_advertise_max(model_id):
         ("@openai:gpt-5.6-terra-pro", "openai"),
         ("openai/gpt-5.6-luna", "openai-api"),
         ("azure/gpt-5.6-luna-pro", "azure-foundry"),
+        ("@openai-codex:gpt-5.6-luna-900k", "openai-codex"),
     ],
 )
 def test_known_gpt_5_6_prefixed_and_provider_hinted_ids_advertise_max(model_id, provider_id):
@@ -112,7 +146,7 @@ def test_status_metadata_advertises_and_preserves_max_for_known_gpt_5_6(monkeypa
         lambda *_args, **_kwargs: {"agent": {"reasoning_effort": "max"}},
     )
     status = cfg.get_reasoning_status(
-        model_id="gpt-5.6-terra", provider_id="openai-codex"
+        model_id="gpt-5.6-luna-900k", provider_id="openai-codex"
     )
     assert "max" in status["supported_efforts"]
     assert status["supports_reasoning_effort"] is True

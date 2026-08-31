@@ -3219,6 +3219,9 @@ _CODEX_MAX_REASONING_MODELS = frozenset({
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 })
+# Hermes exposes opt-in large-context Codex aliases with this suffix, then strips
+# it before sending the model id upstream. Capability checks must do the same.
+_CODEX_CONTEXT_VARIANT_SUFFIX = "-900k"
 
 
 def parse_reasoning_effort(effort):
@@ -3543,6 +3546,8 @@ def _filter_reasoning_efforts_for_provider(
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    if provider == "openai-codex" and bare.endswith(_CODEX_CONTEXT_VARIANT_SUFFIX):
+        bare = bare[:-len(_CODEX_CONTEXT_VARIANT_SUFFIX)]
     # OpenAI-family lanes (Codex, direct OpenAI, Azure Foundry) cap o-series at
     # high and GPT-5 at xhigh unless the exact lane/model pair is allowlisted.
     if provider in {"openai-codex", "openai", "openai-api", "azure-foundry", "azure-openai", "azure"}:
