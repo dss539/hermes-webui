@@ -11508,6 +11508,8 @@ function _topbarMessageMetaText(){
 function syncTopbar(){
   if(!S.session){
     document.title=assistantDisplayName();
+    // YOLO is per-session; with no session loaded the toggle must read off.
+    if(typeof _updateYoloPill==='function'&&_yoloEnabled){_yoloEnabled=false;_updateYoloPill();}
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
     if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
     if(typeof syncModelChip==='function') syncModelChip();

@@ -2055,6 +2055,7 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    if(typeof _updateYoloPill==='function'){_yoloEnabled=false;_updateYoloPill();}
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -2542,6 +2543,7 @@ async function loadSession(sid){
   }
   S.session=data.session;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+  if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
@@ -2796,7 +2798,6 @@ async function loadSession(sid){
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-    if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.
     // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
@@ -2897,7 +2898,6 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
     }else{
       S.busy=false;
       S.activeStreamId=null;
