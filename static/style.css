@@ -2005,14 +2005,12 @@
   .approval-btn.yolo{background:rgba(245,158,11,0.12);border-color:rgba(245,158,11,0.3);color:#f59e0b;}
   .approval-btn.yolo:hover{background:rgba(245,158,11,0.22);border-color:rgba(245,158,11,0.5);color:#fbbf24;}
   /* ── YOLO pill in composer footer ── */
-  .yolo-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.35);cursor:pointer;transition:all .15s;line-height:1.4;white-space:nowrap;}
-  .yolo-pill:hover{background:rgba(245,158,11,0.25);border-color:rgba(245,158,11,0.5);transform:translateY(-1px);}
-  .yolo-pill:active{transform:translateY(0);}
-  .yolo-pill:not(.active){background:transparent;color:var(--muted);border-color:var(--border);}
-  .yolo-pill:not(.active):hover{color:var(--text);border-color:var(--border2);}
-  @media (pointer:coarse){.yolo-pill{min-height:44px;padding:0 14px;}}
-  .yolo-pill-icon{font-size:12px;}
-  .yolo-pill-label{font-size:10px;}
+  /* Sized like the workspace selector (.composer-workspace-group/-chip). */
+  .yolo-pill{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;font-weight:500;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.35);cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;white-space:nowrap;}
+  .yolo-pill:hover{background:rgba(245,158,11,0.25);border-color:rgba(245,158,11,0.5);}
+  .yolo-pill:not(.active){background:transparent;color:var(--muted);border-color:var(--border2);}
+  .yolo-pill:not(.active):hover{background:var(--hover-bg);color:var(--text);}
+  .yolo-pill-icon{line-height:1;}
   /* ── Queue flyout (same slide-up pattern as approval-card) ── */
   .queue-card{position:absolute;left:0;right:0;bottom:0;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;z-index:2;}
   .queue-card.visible{pointer-events:auto;}
