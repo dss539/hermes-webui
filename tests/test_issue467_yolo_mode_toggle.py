@@ -13,6 +13,8 @@ import os
 import re
 import json
 import pathlib
+import shutil
+import subprocess
 import pytest
 
 from tests.conftest import requires_agent_modules
@@ -213,10 +215,37 @@ class TestYoloPillHTML:
     def test_yolo_pill_has_onclick(self, index_html):
         assert 'onclick="cmdYolo()"' in index_html
 
-    def test_yolo_pill_hidden_by_default(self, index_html):
+    def test_yolo_pill_is_visible_toggle(self, index_html):
+        # Tap target for touch devices: always rendered, starts un-pressed.
         pill_match = re.search(r'<button[^>]*id="yoloPill"[^>]*>', index_html)
         assert pill_match
-        assert "display:none" in pill_match.group(0)
+        assert "display:none" not in pill_match.group(0)
+        assert 'aria-pressed="false"' in pill_match.group(0)
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+    def test_yolo_pill_reflects_state_and_ignores_stale_fetch(self, messages_js):
+        start = messages_js.index("let _yoloEnabled = false;")
+        end = messages_js.index("\nasync function toggleYoloFromApproval", start)
+        script = "\n".join([
+            "const cls=new Set(); const attrs={};",
+            "const pill={title:'',classList:{toggle(c,on){on?cls.add(c):cls.delete(c);}},setAttribute(k,v){attrs[k]=v;}};",
+            "const $=id=>id==='yoloPill'?pill:null; const t=k=>'T:'+k;",
+            "let S={session:{session_id:'a'}}; let resolveFetch;",
+            "const api=()=>new Promise(r=>{resolveFetch=r;});",
+            messages_js[start:end],
+            "(async()=>{",
+            " _yoloEnabled=true; _updateYoloPill();",
+            " if(!cls.has('active')||attrs['aria-pressed']!=='true'||pill.title!=='T:yolo_pill_title_active') throw new Error('on state');",
+            " _yoloEnabled=false; _updateYoloPill();",
+            " if(cls.has('active')||attrs['aria-pressed']!=='false'||pill.title!=='T:cmd_yolo') throw new Error('off state');",
+            " const p=_fetchYoloState('a'); S={session:{session_id:'b'}}; resolveFetch({yolo_enabled:true}); await p;",
+            " if(_yoloEnabled||cls.has('active')) throw new Error('stale fetch applied');",
+            " const q=_fetchYoloState('b'); resolveFetch({yolo_enabled:true}); await q;",
+            " if(!_yoloEnabled||!cls.has('active')) throw new Error('current fetch not applied');",
+            "})().catch(e=>{console.error(e.stack||e);process.exit(1)});",
+        ])
+        result = subprocess.run([shutil.which("node"), "-e", script], text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
 
     def test_skip_all_button_exists(self, index_html):
         assert 'id="approvalSkipAll"' in index_html

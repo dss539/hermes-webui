@@ -7246,20 +7246,23 @@ let _yoloEnabled = false;
 async function _fetchYoloState(sid) {
   try {
     const data = await api('/api/session/yolo?session_id=' + encodeURIComponent(sid));
+    // Ignore a late response for a session the user has already left.
+    if (!S.session || S.session.session_id !== sid) return;
     _yoloEnabled = !!data.yolo_enabled;
     _updateYoloPill();
   } catch (_) { /* ignore */ }
 }
 
+// The pill is an always-visible tap toggle (same path as /yolo): muted when
+// off, amber when on. Settings → composer controls can still hide it.
 function _updateYoloPill() {
   const pill = $('yoloPill');
   if (!pill) return;
-  pill.style.display = _yoloEnabled ? '' : 'none';
-  if (_yoloEnabled) {
-    pill.title = t('yolo_pill_title_active');
-    pill.setAttribute('data-i18n-title', 'yolo_pill_title_active');
-  }
-  if (typeof applyLocaleToDOM === 'function') applyLocaleToDOM();
+  pill.classList.toggle('active', _yoloEnabled);
+  pill.setAttribute('aria-pressed', _yoloEnabled ? 'true' : 'false');
+  const titleKey = _yoloEnabled ? 'yolo_pill_title_active' : 'cmd_yolo';
+  pill.title = t(titleKey);
+  pill.setAttribute('data-i18n-title', titleKey);
 }
 
 async function toggleYoloFromApproval() {
