@@ -5278,6 +5278,11 @@ _GPT_5_6_REASONING_MODELS = frozenset({
 })
 
 
+# Hermes exposes opt-in large-context Codex aliases with this suffix, then strips
+# it before sending the model id upstream. Capability checks must do the same.
+_CODEX_CONTEXT_VARIANT_SUFFIX = "-900k"
+
+
 def _is_gpt_5_6_reasoning_model(bare_model: str) -> bool:
     """Return whether an OpenAI-family model uses GPT-5.6's max ladder."""
     return str(bare_model or "").strip().lower() in _GPT_5_6_REASONING_MODELS
@@ -5297,6 +5302,8 @@ def _filter_reasoning_efforts_for_provider(
     normalized = list(dict.fromkeys(normalized))
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    if provider == "openai-codex" and bare.endswith(_CODEX_CONTEXT_VARIANT_SUFFIX):
+        bare = bare[:-len(_CODEX_CONTEXT_VARIANT_SUFFIX)]
     # OpenAI-family lanes cap pre-GPT-5.6 GPT-5 models at xhigh and o-series at
     # high. GPT-5.6's alias and Sol/Terra/Luna variants natively accept max.
     if provider in _OPENAI_FAMILY_REASONING_PROVIDERS:
