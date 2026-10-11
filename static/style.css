@@ -2481,20 +2481,22 @@
   .img-lightbox-nav-next{right:16px;}
   .img-lightbox-counter{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.5);color:#fff;font-size:14px;padding:4px 14px;border-radius:12px;pointer-events:none;}
   /* Image policy uses the shared Mermaid canvas with a transparent, safe-area
-     viewport. Chrome stays outside the pan/zoom surface at every scale. */
-  .img-lightbox:has(.img-zoom-viewer){touch-action:none;overscroll-behavior:none;}
+     viewport. On narrow screens the navigation buttons overlap the surface. */
+  .img-lightbox:has(.img-zoom-viewer){touch-action:none;overscroll-behavior:none;background:rgba(0,0,0,.92);}
   .img-zoom-viewer{position:absolute;inset:0;pointer-events:none;}
   .img-zoom-viewport{position:absolute;left:max(5vw,env(safe-area-inset-left));right:max(5vw,env(safe-area-inset-right));top:calc(64px + env(safe-area-inset-top));bottom:calc(76px + env(safe-area-inset-bottom));border:0;border-radius:0;background:transparent;pointer-events:auto;cursor:default;}
   .img-zoom-viewport.is-zoomed{cursor:grab;}
   .img-zoom-viewport.is-panning.is-zoomed{cursor:grabbing;}
   .img-lightbox .img-zoom-viewport img{max-width:none;max-height:none;border-radius:0;box-shadow:none;}
-  .img-zoom-toolbar{position:absolute;bottom:calc(20px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);flex-wrap:nowrap;gap:8px;pointer-events:auto;}
-  .img-zoom-toolbar .mermaid-viewer-btn{width:36px;height:36px;}
+  .img-zoom-viewport.is-zoomed img{cursor:inherit;}
+  .img-zoom-toolbar{position:absolute;bottom:calc(20px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);flex-wrap:nowrap;gap:8px;pointer-events:auto;background:rgba(20,22,28,.9);border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:5px;}
+  .img-zoom-toolbar .mermaid-viewer-btn{width:36px;height:36px;border:0;border-radius:50%;background:rgba(255,255,255,.12);color:#fff;}
+  .img-zoom-toolbar .mermaid-viewer-btn:hover{background:rgba(255,255,255,.22);color:#fff;}
   .img-lightbox:has(.img-zoom-viewer) .img-lightbox-close{top:calc(16px + env(safe-area-inset-top));right:calc(20px + env(safe-area-inset-right));}
   .img-lightbox:has(.img-zoom-viewer) .img-lightbox-nav-prev{left:calc(16px + env(safe-area-inset-left));}
   .img-lightbox:has(.img-zoom-viewer) .img-lightbox-nav-next{right:calc(16px + env(safe-area-inset-right));}
-  .img-lightbox:has(.img-zoom-viewer) .img-lightbox-counter{bottom:calc(24px + env(safe-area-inset-bottom));left:auto;right:calc(20px + env(safe-area-inset-right));transform:none;}
-  @media (pointer:coarse){
+  .img-lightbox:has(.img-zoom-viewer) .img-lightbox-counter{bottom:calc(24px + env(safe-area-inset-bottom));left:auto;right:calc(20px + env(safe-area-inset-right));transform:none;background:rgba(20,22,28,.9);border:1px solid rgba(255,255,255,.14);border-radius:999px;}
+  @media (any-pointer:coarse){
     .img-zoom-toolbar .mermaid-viewer-btn,.img-lightbox:has(.img-zoom-viewer) .img-lightbox-close{width:44px;height:44px;}
     .img-zoom-toolbar .mermaid-viewer-btn svg{width:18px;height:18px;}
   }
