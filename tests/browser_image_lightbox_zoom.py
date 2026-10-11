@@ -409,18 +409,9 @@ def repair_checks(page, engine, collect=False):
         check(not lb.evaluate("lb=>{const e=new CustomEvent('gesturestart',{cancelable:true});lb.dispatchEvent(e);return e.defaultPrevented;}"),'close removes gesture listeners')
         lb.dispose()
     run('2 Safari gesture ownership',gesture)
-    def hybrid():
-        fresh();session=page.context.new_cdp_session(page)
-        try:
-            session.send('Emulation.setEmulatedMedia',{'features':[{'name':'any-pointer','value':'coarse'},{'name':'pointer','value':'fine'}]})
-            media=page.evaluate("({any:matchMedia('(any-pointer:coarse)').matches,primary:matchMedia('(pointer:coarse)').matches})")
-            check(media=={'any':True,'primary':False},'hybrid emulation must be active: '+str(media))
-            rects=page.locator('.img-zoom-toolbar button,.img-lightbox-close').evaluate_all('(bs)=>bs.map(b=>({w:b.getBoundingClientRect().width,h:b.getBoundingClientRect().height}))')
-            check(all(r['w']==44 and r['h']==44 for r in rects),'hybrid controls 44px: '+str(rects))
-        finally:
-            session.send('Emulation.setEmulatedMedia',{'features':[]});session.detach()
-    if engine=='chromium':run('3 hybrid touch targets',hybrid)
-    else:print('SKIP webkit: Chromium CDP hybrid-pointer emulation')
+    # Hybrid-only target sizing is unverified: installed Chromium ignores
+    # pointer/any-pointer CDP media overrides. Supervisor dropped that case;
+    # the real coarse-touch computed-size checks remain in zoom_checks.
     def capture():
         s,x,y=fresh()
         page.mouse.move(x,y);page.mouse.down()
