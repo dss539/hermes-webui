@@ -2484,7 +2484,7 @@
      viewport. On narrow screens the navigation buttons overlap the surface. */
   .img-lightbox:has(.img-zoom-viewer){touch-action:none;overscroll-behavior:none;background:rgba(0,0,0,.92);}
   .img-zoom-viewer{position:absolute;inset:0;pointer-events:none;}
-  .img-zoom-viewport{position:absolute;left:max(5vw,env(safe-area-inset-left));right:max(5vw,env(safe-area-inset-right));top:calc(64px + env(safe-area-inset-top));bottom:calc(76px + env(safe-area-inset-bottom));border:0;border-radius:0;background:transparent;pointer-events:auto;cursor:default;}
+  .img-zoom-viewport{position:absolute;left:max(5vw,env(safe-area-inset-left));right:max(5vw,env(safe-area-inset-right));top:calc(64px + env(safe-area-inset-top));bottom:calc(76px + env(safe-area-inset-bottom));border:0;border-radius:0;background:transparent;pointer-events:auto;cursor:zoom-out;}
   .img-zoom-viewport.is-zoomed{cursor:grab;}
   .img-zoom-viewport.is-panning.is-zoomed{cursor:grabbing;}
   .img-lightbox .img-zoom-viewport img{max-width:none;max-height:none;border-radius:0;box-shadow:none;}

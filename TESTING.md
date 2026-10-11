@@ -190,6 +190,29 @@ a closed drawer (#8044). Run it locally with
 `python tests/browser_project_picker_keyboard.py`; add `--screenshots DIR` to
 write the open picker at 390x844, 820x1180, 844x390 and 1440x900.
 
+Finally it runs `tests/browser_image_lightbox_zoom.py` in Chromium, the image
+viewer zoom gate. On desktop (1440x900) and phone (390x844 touch) it opens a
+chat image in the lightbox and checks:
+- wheel and Ctrl+wheel zoom keep the point under the cursor fixed and never zoom
+  or scroll the page;
+- a two-finger pinch (trusted CDP touch) zooms around its centre;
+- the image never zooms below fit, reaches at least native size, and pans only
+  up to its edges;
+- double-click and double-tap toggle between fit and native size, and taps
+  tolerate a few pixels of finger jitter;
+- one-finger swipe navigates when not zoomed and pans when zoomed;
+- prev/next, arrow keys, swipe and reopening reset to fit, and a late image load
+  keeps a zoom the user already made;
+- close, Escape and backdrop clicks still close, but a drag that ends on the
+  backdrop does not;
+- Safari GestureEvents zoom the image;
+- touch controls are at least 44px and sit inside the safe areas;
+- the Mermaid inline viewer and Mermaid lightbox keep their controls.
+
+Run it locally with `python tests/browser_image_lightbox_zoom.py`
+(`--engine chromium|webkit|all`, default all; WebKit needs
+`playwright install webkit`, and replaces the CDP pinch with DOM touch events).
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic

@@ -2259,7 +2259,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   canvas.style.width = Math.max(1, Math.round(box.width)) + 'px';
   canvas.style.height = Math.max(1, Math.round(box.height)) + 'px';
   svgEl.classList.add('mermaid-viewer-svg');
-  if(mode === 'lightbox') svgEl.classList.add('mermaid-lightbox-svg');
+  if(mode === 'lightbox' && !isImage) svgEl.classList.add('mermaid-lightbox-svg');
   svgEl.style.width = '100%';
   svgEl.style.height = '100%';
   svgEl.style.display = 'block';
@@ -2478,10 +2478,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
     state.dragPointerId = e.pointerId != null ? e.pointerId : null;
     state.dragStartX = state.x;
     state.dragStartY = state.y;
-    if(isImage){
-      state.panGesture = _isZoomed();
-      state.lastTap = state.lastTap || null;
-    }
+    if(isImage) state.panGesture = _isZoomed();
     viewport.classList.add('is-panning');
     if(state.dragPointerId != null && viewport.setPointerCapture) viewport.setPointerCapture(state.dragPointerId);
     if(e.preventDefault) e.preventDefault();

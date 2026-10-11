@@ -425,6 +425,13 @@ def repair_checks(page, engine, collect=False):
         fresh();page.get_by_role('button',name='Zoom in',exact=True).click()
         check(page.locator('.img-lightbox img').evaluate('i=>getComputedStyle(i).cursor')=='grab','zoomed image inherits grab cursor')
     run('5 image grab cursor',cursor)
+    def no_diagram_paint():
+        # Transparent images must not get the Mermaid diagram's opaque --code-bg plate.
+        fresh()
+        check(not page.locator('.img-lightbox img.mermaid-lightbox-svg').count(),'image has no Mermaid lightbox class')
+        bg=page.locator('.img-lightbox img').evaluate('i=>getComputedStyle(i).backgroundColor')
+        check(bg in ('rgba(0, 0, 0, 0)','transparent'),'lightbox image background is transparent: '+bg)
+    run('GLM-1 transparent image background',no_diagram_paint)
     def slow_load():
         fresh();pending=[]
         url='**/zoom-manual-load.svg'

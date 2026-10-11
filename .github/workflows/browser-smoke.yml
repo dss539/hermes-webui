@@ -128,3 +128,7 @@ jobs:
       - name: Run project-picker keyboard gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_project_picker_keyboard.py
+
+      - name: Run image lightbox zoom gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_image_lightbox_zoom.py --engine chromium
