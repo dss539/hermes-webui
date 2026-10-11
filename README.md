@@ -208,6 +208,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Approval card for dangerous shell commands (allow once / session / always / deny)
 - SSE auto-reconnect on network blips (SSH tunnel resilience)
 - File attachments persist across page reloads and are stored outside the active workspace by default (`~/.hermes/webui/attachments/<session_id>/`, or `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/` when configured)
+- Image lightbox -- wheel or pinch to zoom, drag to pan while zoomed, and double-click/double-tap to toggle fit and native size (2× for small images). Use + / − / Fit controls; browse message images with arrows or a swipe at fit. Navigation and reopening reset to fit; Escape, ×, or a backdrop click closes. Zoom is bounded from fit to 8× fit, extended when needed to reach native resolution.
 - Message timestamps (HH:MM next to each message, full date on hover)
 - Code block copy button with "Copied!" feedback
 - Syntax highlighting via Prism.js (Python, JS, bash, JSON, SQL, and more)

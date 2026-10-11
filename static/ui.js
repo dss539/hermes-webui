@@ -2238,7 +2238,8 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   if(!svgEl) return null;
   const mode = options.mode === 'lightbox' ? 'lightbox' : 'inline';
   const openLightbox = typeof options.openLightbox === 'function' ? options.openLightbox : () => _openMermaidLightbox(svgEl);
-  const box = _mermaidSvgBox(svgEl);
+  const isImage = options.image === true;
+  const box = isImage ? {width: svgEl.naturalWidth || 1, height: svgEl.naturalHeight || 1} : _mermaidSvgBox(svgEl);
   const host = svgEl.parentNode;
   const root = document.createElement('div');
   root.className = 'mermaid-viewer mermaid-viewer--' + mode;
@@ -2255,6 +2256,13 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   svgEl.style.width = '100%';
   svgEl.style.height = '100%';
   svgEl.style.display = 'block';
+  if(isImage){
+    root.className = 'img-zoom-viewer';
+    toolbar.className += ' img-zoom-toolbar';
+    viewport.className += ' img-zoom-viewport';
+    svgEl.draggable = false;
+    svgEl.ondragstart = e => e.preventDefault();
+  }
   viewport.appendChild(canvas);
   root.appendChild(toolbar);
   root.appendChild(viewport);
@@ -2288,8 +2296,10 @@ function _mountPanZoomViewer(svgEl, options = {}) {
     pinchStartY: 0,
   };
   root._mermaidViewer = state;
+  if(isImage) root._panZoomViewer = state;
 
   function _lightboxViewportEnvelope() {
+    if(isImage) return {width: viewport.clientWidth || window.innerWidth || 1, height: viewport.clientHeight || window.innerHeight || 1};
     const width = Math.round((window.innerWidth || box.width) * 0.9);
     const height = Math.round((window.innerHeight || box.height) * 0.9);
     return {
@@ -2328,6 +2338,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   }
 
   function _minScale(){
+    if(isImage) return Math.min(1, _rawFitScale(_viewportSize()));
     // Inline stays bounded by readable-height minimum to preserve usability.
     // Lightbox allows fit-to-screen to shrink below the old 0.25 floor when
     // the diagram envelope is narrower than 25%.
@@ -2343,7 +2354,21 @@ function _mountPanZoomViewer(svgEl, options = {}) {
     return Math.min(fallback.height, Math.max(_MERMAID_VIEWER_INLINE_MIN_HEIGHT, widthBasedHeight));
   }
 
+  function _maxScale(){
+    return isImage ? Math.max(_MERMAID_VIEWER_MAX_SCALE * _minScale(), 1) : _MERMAID_VIEWER_MAX_SCALE;
+  }
+
+  function _isZoomed(){ return state.scale > _minScale() + 1e-9; }
+
   function _applyTransform(){
+    if(isImage){
+      const size = _viewportSize();
+      const clampAxis = (position, extent, available) => extent <= available
+        ? (available - extent) / 2 : Math.min(0, Math.max(available - extent, position));
+      state.x = clampAxis(state.x, box.width * state.scale, size.width);
+      state.y = clampAxis(state.y, box.height * state.scale, size.height);
+      viewport.classList.toggle('is-zoomed', _isZoomed());
+    }
     canvas.style.transform = `translate(${Math.round(state.x)}px, ${Math.round(state.y)}px) scale(${state.scale})`;
     canvas.style.transformOrigin = '0 0';
   }
@@ -2357,12 +2382,13 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   }
 
   function _fitScale(){
+    if(isImage) return _minScale();
     const size = _viewportSize();
-    return Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, _rawFitScale(size)));
+    return Math.max(_minScale(), Math.min(_maxScale(), _rawFitScale(size)));
   }
 
   function _setScale(nextScale, anchorX, anchorY){
-    const bounded = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, nextScale));
+    const bounded = Math.max(_minScale(), Math.min(_maxScale(), nextScale));
     if(!Number.isFinite(bounded) || !box.width || !box.height) return;
     const focusX = Number.isFinite(anchorX) ? anchorX : _viewportSize().width / 2;
     const focusY = Number.isFinite(anchorY) ? anchorY : _viewportSize().height / 2;
@@ -2389,15 +2415,17 @@ function _mountPanZoomViewer(svgEl, options = {}) {
     const previousFitScale = hadFitScale ? state.fitScale : _fitScale();
     const wasAtFit = !hadFitScale || Math.abs(state.scale - previousFitScale) < 1e-9;
     const envelope = _lightboxViewportEnvelope();
-    viewport.style.width = Math.max(1, Math.round(envelope.width)) + 'px';
-    viewport.style.height = Math.max(1, Math.round(envelope.height)) + 'px';
+    if(!isImage){
+      viewport.style.width = Math.max(1, Math.round(envelope.width)) + 'px';
+      viewport.style.height = Math.max(1, Math.round(envelope.height)) + 'px';
+    }
     const nextFitScale = _fitScale();
     state.fitScale = nextFitScale;
     if(wasAtFit){
       state.scale = nextFitScale;
       _centerForScale(state.scale);
     } else {
-      state.scale = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, state.scale));
+      state.scale = Math.max(_minScale(), Math.min(_maxScale(), state.scale));
     }
     _applyTransform();
   }
@@ -2430,7 +2458,9 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   }
 
   function _onPointerDown(e){
+    if(isImage && e.pointerType === 'touch') return;
     if(state.pinching) return;
+    if(isImage && state.dragging) return;
     if(e.button != null && e.button !== 0) return;
     state.dragging = true;
     state.dragged = false;
@@ -2439,6 +2469,10 @@ function _mountPanZoomViewer(svgEl, options = {}) {
     state.dragPointerId = e.pointerId != null ? e.pointerId : null;
     state.dragStartX = state.x;
     state.dragStartY = state.y;
+    if(isImage){
+      state.panGesture = _isZoomed();
+      state.lastTap = state.lastTap || null;
+    }
     viewport.classList.add('is-panning');
     if(state.dragPointerId != null && viewport.setPointerCapture) viewport.setPointerCapture(state.dragPointerId);
     if(e.preventDefault) e.preventDefault();
@@ -2447,17 +2481,24 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   function _onPointerMove(e){
     if(state.pinching) return;
     if(!state.dragging) return;
+    if(isImage && state.dragPointerId != null && e.pointerId !== state.dragPointerId) return;
     const dx = (Number(e.clientX) || 0) - state.dragOriginX;
     const dy = (Number(e.clientY) || 0) - state.dragOriginY;
     if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
+    if(isImage && !state.panGesture) return;
     state.x = state.dragStartX + dx;
     state.y = state.dragStartY + dy;
     _applyTransform();
   }
 
-  function _endPointerDrag(){
+  function _endPointerDrag(e){
     if(!state.dragging) return;
+    if(isImage && e && state.dragPointerId != null && e.pointerId !== state.dragPointerId) return;
     state.dragging = false;
+    if(isImage && state.dragged){
+      state.suppressClickUntil = Date.now() + 500;
+      state.lastTap = null;
+    }
     if(state.dragPointerId != null && viewport.releasePointerCapture){
       try{ viewport.releasePointerCapture(state.dragPointerId); }catch(_){}
     }
@@ -2466,6 +2507,12 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   }
 
   function _openViewerOnClick(e){
+    if(isImage){
+      if(Date.now() >= (state.suppressClickUntil || 0) && _outsideImage(e.clientX, e.clientY)){
+        if(typeof options.closeBackdrop === 'function') options.closeBackdrop();
+      }
+      return;
+    }
     if(state.pinching) return;
     if(mode !== 'inline') return;
     if(state.dragged){
@@ -2484,8 +2531,29 @@ function _mountPanZoomViewer(svgEl, options = {}) {
     return Math.sqrt(dx * dx + dy * dy);
   }
 
+  function _outsideImage(clientX, clientY){
+    const rect = svgEl.getBoundingClientRect();
+    return clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom;
+  }
+
+  function _toggleImageZoom(clientX, clientY){
+    const rect = viewport.getBoundingClientRect();
+    if(_isZoomed()) _fitViewer();
+    else _setScale(_minScale() < 1 ? 1 : 2, clientX - rect.left, clientY - rect.top);
+  }
+
   function _onTouchStart(e){
+    if(isImage && e.touches.length === 1){
+      state.touchSingle = true;
+      _onPointerDown(e.touches[0]);
+      if(e.preventDefault) e.preventDefault();
+    }
     if(e.touches.length === 2){
+      if(isImage){
+        state.touchSingle = false;
+        state.lastTap = null;
+        state.dragged = true;
+      }
       state.pinching = true;
       state.pinchStartDist = _touchDist(e.touches);
       state.pinchStartScale = state.scale;
@@ -2500,6 +2568,11 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   }
 
   function _onTouchMove(e){
+    if(isImage && !state.pinching && e.touches.length === 1){
+      _onPointerMove(e.touches[0]);
+      if(e.preventDefault) e.preventDefault();
+      return;
+    }
     if(!state.pinching || e.touches.length < 2) return;
     const rect = viewport.getBoundingClientRect();
     const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
@@ -2507,7 +2580,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
     const currDist = _touchDist(e.touches);
     if(state.pinchStartDist > 0 && state.pinchStartScale > 0){
       const rawScale = state.pinchStartScale * (currDist / state.pinchStartDist);
-      const boundedScale = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, rawScale));
+      const boundedScale = Math.max(_minScale(), Math.min(_maxScale(), rawScale));
       const ratio = boundedScale / state.pinchStartScale;
       state.scale = boundedScale;
       state.x = cx - (state.pinchStartCX - state.pinchStartX) * ratio;
@@ -2521,6 +2594,36 @@ function _mountPanZoomViewer(svgEl, options = {}) {
     if(e.touches.length < 2 && state.pinching){
       state.pinching = false;
       state.dragged = true;
+      if(isImage){
+        state.suppressClickUntil = Date.now() + 500;
+        if(e.touches.length === 1){
+          _onPointerDown(e.touches[0]);
+          state.dragged = true;
+          state.panGesture = true;
+        }
+      }
+      return;
+    }
+    if(isImage && !e.touches.length){
+      const touch = e.changedTouches[0];
+      const dx = touch.clientX - state.dragOriginX;
+      const dy = touch.clientY - state.dragOriginY;
+      const swipe = state.touchSingle && !state.panGesture && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5;
+      const tap = state.touchSingle && !state.dragged;
+      _endPointerDrag();
+      if(swipe && typeof options.navigate === 'function') options.navigate(dx < 0 ? 1 : -1);
+      if(tap){
+        if(_outsideImage(touch.clientX, touch.clientY)){
+          if(typeof options.closeBackdrop === 'function') options.closeBackdrop();
+          return;
+        }
+        const last = state.lastTap;
+        if(last && Date.now() - last.time < 300 && Math.hypot(touch.clientX - last.x, touch.clientY - last.y) < 24){
+          _toggleImageZoom(touch.clientX, touch.clientY);
+          state.lastTap = null;
+        } else state.lastTap = {time: Date.now(), x: touch.clientX, y: touch.clientY};
+      }
+      state.touchSingle = false;
     }
   }
 
@@ -2528,13 +2631,25 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   viewport.onpointermove = _onPointerMove;
   viewport.onpointerup = _endPointerDrag;
   viewport.onpointercancel = _endPointerDrag;
-  viewport.onpointerleave = _endPointerDrag;
+  viewport.onpointerleave = isImage ? null : _endPointerDrag;
   viewport.onwheel = _zoomFromWheel;
   viewport.onclick = _openViewerOnClick;
+  if(isImage) viewport.ondblclick = e => {
+    e.preventDefault();
+    _toggleImageZoom(e.clientX, e.clientY);
+  };
   viewport.addEventListener('touchstart', _onTouchStart, {passive: false});
   viewport.addEventListener('touchmove', _onTouchMove, {passive: false});
   viewport.addEventListener('touchend', _onTouchEnd);
-  viewport.addEventListener('touchcancel', function _onTouchCancel(){ state.pinching = false; });
+  viewport.addEventListener('touchcancel', function _onTouchCancel(){
+    state.pinching = false;
+    if(isImage){
+      state.dragged = true;
+      state.touchSingle = false;
+      state.lastTap = null;
+      _endPointerDrag();
+    }
+  });
   root.onclick = e => e.stopPropagation();
   state.fit = _fitViewer;
   state.reset = _resetViewer;
@@ -2544,10 +2659,28 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   state.applyTransform = _applyTransform;
   state.resizeToEnvelope = _resizeToEnvelope;
   state.openLightbox = openLightbox;
+  if(isImage){
+    state.cancelGesture = () => {
+      state.dragged = state.dragged || state.dragging || state.pinching;
+      _endPointerDrag();
+      state.pinching = false;
+      state.touchSingle = false;
+      state.lastTap = null;
+    };
+    state.loadImage = () => {
+      state.cancelGesture();
+      box.width = svgEl.naturalWidth || 1;
+      box.height = svgEl.naturalHeight || 1;
+      canvas.style.width = box.width + 'px';
+      canvas.style.height = box.height + 'px';
+      _fitViewer();
+    };
+    svgEl.onload = state.loadImage;
+  }
 
   toolbar.appendChild(_createMermaidViewerButton('Zoom in', 'zoomIn', _zoomIn));
   toolbar.appendChild(_createMermaidViewerButton('Zoom out', 'zoomOut', _zoomOut));
-  toolbar.appendChild(_createMermaidViewerButton('Reset view', 'reset', _resetViewer));
+  if(!isImage) toolbar.appendChild(_createMermaidViewerButton('Reset view', 'reset', _resetViewer));
   toolbar.appendChild(_createMermaidViewerButton('Fit to screen', 'fit', _fitViewer));
   if(mode === 'inline'){
     toolbar.appendChild(_createMermaidViewerButton('Fullscreen', 'fullscreen', openLightbox));
@@ -2558,7 +2691,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   } else {
     const initialHeight = _inlineViewportHeight();
     const readableScale = initialHeight / Math.max(1, box.height);
-    state.scale = Math.max(_minScale(), Math.min(_MERMAID_VIEWER_MAX_SCALE, readableScale));
+    state.scale = Math.max(_minScale(), Math.min(_maxScale(), readableScale));
     viewport.style.width = '100%';
     viewport.style.height = Math.max(1, Math.round(initialHeight)) + 'px';
     _centerForScale(state.scale);
@@ -2654,7 +2787,10 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   cls.setAttribute('aria-label', 'Close');
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
-  lb.appendChild(img);
+  const viewer = _mountPanZoomViewer(img, {mode:'lightbox', image:true,
+    navigate: direction => _navigateLightbox(lb, direction), closeBackdrop: () => _closeImgLightbox(lb)});
+  lb._imageViewer = viewer._panZoomViewer;
+  lb.appendChild(viewer);
   lb.appendChild(cls);
   // Prev/Next navigation — store index and images on lb so a single set of
   // handlers reads live values without closure churn on every nav.
@@ -2678,8 +2814,22 @@ function _openImgLightboxWithNav(src, alt, images, index) {
     lb.appendChild(lb._counterEl);
     lb._counterEl.textContent = (index+1) + ' / ' + images.length;
   }
-  lb.onclick = () => _closeImgLightbox(lb);
+  lb.onclick = e => {
+    if(e.target !== lb) return;
+    if(Date.now() < (lb._imageViewer.suppressClickUntil || 0)) return;
+    _closeImgLightbox(lb);
+  };
+  // Capture the whole modal, including its backdrop, so wheel/pinch never
+  // falls through to page zoom or the scroller behind the dialog.
+  lb.addEventListener('wheel', e => {
+    if(!lb._imageViewer.viewport.contains(e.target)) lb._imageViewer.viewport.onwheel(e);
+    e.preventDefault();
+  }, {passive:false});
+  lb.addEventListener('touchmove', e => e.preventDefault(), {passive:false});
   document.body.appendChild(lb);
+  lb._imageResizeHandler = () => lb._imageViewer.resizeToEnvelope();
+  window.addEventListener('resize', lb._imageResizeHandler);
+  lb._imageViewer.loadImage();
   // Single keyboard handler — reads lb._navX live, no remove/add churn.
   lb._keyHandler = e => {
     if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
@@ -2699,8 +2849,13 @@ function _navigateLightbox(lb, direction) {
   const nextImg = images[newIndex];
   const lbImg = lb.querySelector('img');
   if(!lbImg) return;
+  if(lb._imageViewer) lb._imageViewer.cancelGesture();
   lbImg.src = nextImg.src;
   lbImg.alt = nextImg.alt || '';
+  if(lb._imageViewer){
+    lb._imageViewer.fit();
+    if(lbImg.complete && lbImg.naturalWidth) lb._imageViewer.loadImage();
+  }
   lb.setAttribute('aria-label', nextImg.alt || 'Image');
   // Update counter via stored reference — no DOM query.
   if(lb._counterEl) lb._counterEl.textContent = (newIndex+1) + ' / ' + images.length;
@@ -2708,6 +2863,11 @@ function _navigateLightbox(lb, direction) {
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
   document.removeEventListener('keydown', lb._keyHandler);
+  if(lb._imageResizeHandler) window.removeEventListener('resize', lb._imageResizeHandler);
+  if(lb._imageViewer){
+    lb._imageViewer.cancelGesture();
+    lb._imageViewer.svg.onload = null;
+  }
   if(lb._mermaidResizeHandler && window && typeof window.removeEventListener === 'function'){
     window.removeEventListener('resize', lb._mermaidResizeHandler);
   }
