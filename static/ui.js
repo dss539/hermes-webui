@@ -2230,6 +2230,11 @@ function _mermaidSvgBox(svgEl) {
 }
 
 function _mountMermaidViewer(svgEl, options = {}) {
+  return _mountPanZoomViewer(svgEl, options);
+}
+
+// Shared viewport mechanics; Mermaid keeps its existing sizing and gestures.
+function _mountPanZoomViewer(svgEl, options = {}) {
   if(!svgEl) return null;
   const mode = options.mode === 'lightbox' ? 'lightbox' : 'inline';
   const openLightbox = typeof options.openLightbox === 'function' ? options.openLightbox : () => _openMermaidLightbox(svgEl);
