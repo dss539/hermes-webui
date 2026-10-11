@@ -2239,7 +2239,14 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   const mode = options.mode === 'lightbox' ? 'lightbox' : 'inline';
   const openLightbox = typeof options.openLightbox === 'function' ? options.openLightbox : () => _openMermaidLightbox(svgEl);
   const isImage = options.image === true;
-  const box = isImage ? {width: svgEl.naturalWidth || 1, height: svgEl.naturalHeight || 1} : _mermaidSvgBox(svgEl);
+  // Capture the untransformed rendered size before the shared canvas assigns
+  // 100% dimensions. Dimensionless SVGs need a real box, not a 1px placeholder.
+  const renderedImageBox = isImage && svgEl.getBoundingClientRect ? svgEl.getBoundingClientRect() : null;
+  const imageFallbackBox = isImage ? {
+    width: (renderedImageBox && renderedImageBox.width) || 300,
+    height: (renderedImageBox && renderedImageBox.height) || 150,
+  } : null;
+  const box = isImage ? {width: svgEl.naturalWidth || imageFallbackBox.width, height: svgEl.naturalHeight || imageFallbackBox.height} : _mermaidSvgBox(svgEl);
   const host = svgEl.parentNode;
   const root = document.createElement('div');
   root.className = 'mermaid-viewer mermaid-viewer--' + mode;
@@ -2390,6 +2397,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   function _setScale(nextScale, anchorX, anchorY){
     const bounded = Math.max(_minScale(), Math.min(_maxScale(), nextScale));
     if(!Number.isFinite(bounded) || !box.width || !box.height) return;
+    if(isImage) state.manualView = true;
     const focusX = Number.isFinite(anchorX) ? anchorX : _viewportSize().width / 2;
     const focusY = Number.isFinite(anchorY) ? anchorY : _viewportSize().height / 2;
     if(state.scale){
@@ -2402,6 +2410,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   }
 
   function _fitViewer(){
+    if(isImage) state.manualView = false;
     const nextScale = _fitScale();
     state.fitScale = nextScale;
     state.scale = nextScale;
@@ -2484,8 +2493,10 @@ function _mountPanZoomViewer(svgEl, options = {}) {
     if(isImage && state.dragPointerId != null && e.pointerId !== state.dragPointerId) return;
     const dx = (Number(e.clientX) || 0) - state.dragOriginX;
     const dy = (Number(e.clientY) || 0) - state.dragOriginY;
-    if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
+    const tapSlop = isImage && state.touchSingle ? 10 : 3;
+    if(Math.abs(dx) + Math.abs(dy) > tapSlop) state.dragged = true;
     if(isImage && !state.panGesture) return;
+    if(isImage && (dx || dy)) state.manualView = true;
     state.x = state.dragStartX + dx;
     state.y = state.dragStartY + dy;
     _applyTransform();
@@ -2583,6 +2594,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
       const boundedScale = Math.max(_minScale(), Math.min(_maxScale(), rawScale));
       const ratio = boundedScale / state.pinchStartScale;
       state.scale = boundedScale;
+      if(isImage) state.manualView = true;
       state.x = cx - (state.pinchStartCX - state.pinchStartX) * ratio;
       state.y = cy - (state.pinchStartCY - state.pinchStartY) * ratio;
       _applyTransform();
@@ -2609,6 +2621,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
       const dx = touch.clientX - state.dragOriginX;
       const dy = touch.clientY - state.dragOriginY;
       const swipe = state.touchSingle && !state.panGesture && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5;
+      if(Math.abs(dx) + Math.abs(dy) > 10) state.dragged = true;
       const tap = state.touchSingle && !state.dragged;
       _endPointerDrag();
       if(swipe && typeof options.navigate === 'function') options.navigate(dx < 0 ? 1 : -1);
@@ -2632,6 +2645,7 @@ function _mountPanZoomViewer(svgEl, options = {}) {
   viewport.onpointerup = _endPointerDrag;
   viewport.onpointercancel = _endPointerDrag;
   viewport.onpointerleave = isImage ? null : _endPointerDrag;
+  if(isImage) viewport.onlostpointercapture = _endPointerDrag;
   viewport.onwheel = _zoomFromWheel;
   viewport.onclick = _openViewerOnClick;
   if(isImage) viewport.ondblclick = e => {
@@ -2666,14 +2680,58 @@ function _mountPanZoomViewer(svgEl, options = {}) {
       state.pinching = false;
       state.touchSingle = false;
       state.lastTap = null;
+      state.safariGesture = null;
+    };
+    // Safari macOS emits GestureEvents instead of the wheel events used by
+    // other trackpads. Listen on the whole image modal, never on Mermaid or
+    // the document; touch ownership prevents iOS applying the same pinch twice.
+    state.attachGestureEvents = target => {
+      const touchOwnership = e => {
+        state.touchesDown = e.touches.length;
+        if(state.touchesDown || e.type === 'touchcancel') state.safariGesture = null;
+      };
+      const gesture = e => {
+        e.preventDefault();
+        if(state.touchesDown || state.pinching){ state.safariGesture = null; return; }
+        if(e.type === 'gestureend'){ state.safariGesture = null; return; }
+        const eventScale = Number(e.scale);
+        if(!Number.isFinite(eventScale) || eventScale <= 0) return;
+        const rect = viewport.getBoundingClientRect();
+        const focusX = Number.isFinite(e.clientX) ? e.clientX - rect.left : _viewportSize().width / 2;
+        const focusY = Number.isFinite(e.clientY) ? e.clientY - rect.top : _viewportSize().height / 2;
+        if(e.type === 'gesturestart'){
+          state.cancelGesture();
+          state.safariGesture = {eventScale, scale: state.scale, x: state.x, y: state.y, focusX, focusY};
+        } else if(state.safariGesture){
+          const start = state.safariGesture;
+          // Restore the start transform: e.scale is absolute within a gesture,
+          // and bounded intermediate changes must not accumulate anchor drift.
+          state.scale = start.scale;
+          state.x = start.x;
+          state.y = start.y;
+          _setScale(start.scale * eventScale / start.eventScale, start.focusX, start.focusY);
+        }
+      };
+      for(const type of ['touchstart','touchend','touchcancel']) target.addEventListener(type, touchOwnership, {capture:true, passive:true});
+      for(const type of ['gesturestart','gesturechange','gestureend']) target.addEventListener(type, gesture, {passive:false});
+      state.removeGestureEvents = () => {
+        state.cancelGesture();
+        for(const type of ['touchstart','touchend','touchcancel']) target.removeEventListener(type, touchOwnership, true);
+        for(const type of ['gesturestart','gesturechange','gestureend']) target.removeEventListener(type, gesture);
+      };
     };
     state.loadImage = () => {
       state.cancelGesture();
-      box.width = svgEl.naturalWidth || 1;
-      box.height = svgEl.naturalHeight || 1;
+      box.width = svgEl.naturalWidth || imageFallbackBox.width;
+      box.height = svgEl.naturalHeight || imageFallbackBox.height;
       canvas.style.width = box.width + 'px';
       canvas.style.height = box.height + 'px';
-      _fitViewer();
+      if(!state.manualView) _fitViewer();
+      else {
+        state.fitScale = _fitScale();
+        state.scale = Math.max(_minScale(), Math.min(_maxScale(), state.scale));
+        _applyTransform();
+      }
     };
     svgEl.onload = state.loadImage;
   }
@@ -2826,6 +2884,7 @@ function _openImgLightboxWithNav(src, alt, images, index) {
     e.preventDefault();
   }, {passive:false});
   lb.addEventListener('touchmove', e => e.preventDefault(), {passive:false});
+  lb._imageViewer.attachGestureEvents(lb);
   document.body.appendChild(lb);
   lb._imageResizeHandler = () => lb._imageViewer.resizeToEnvelope();
   window.addEventListener('resize', lb._imageResizeHandler);
@@ -2865,7 +2924,7 @@ function _closeImgLightbox(lb) {
   document.removeEventListener('keydown', lb._keyHandler);
   if(lb._imageResizeHandler) window.removeEventListener('resize', lb._imageResizeHandler);
   if(lb._imageViewer){
-    lb._imageViewer.cancelGesture();
+    lb._imageViewer.removeGestureEvents();
     lb._imageViewer.svg.onload = null;
   }
   if(lb._mermaidResizeHandler && window && typeof window.removeEventListener === 'function'){
