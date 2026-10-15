@@ -6869,14 +6869,17 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(!opts.ignoreStreamJustFinished && typeof window !== 'undefined' && window._streamJustFinished) return 'skipped';
   if(typeof document !== 'undefined' && document.hidden) return 'skipped';
   const sid = S.session.session_id;
-  const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
-  const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
   _activeSessionExternalRefreshInFlight = true;
   try{
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
     if(!data || !data.session) return 'unchanged';
     if(!S.session || S.session.session_id !== sid) return 'skipped';
     if(S.busy || S.activeStreamId) return 'skipped';
+    // Read the local state after the probe returns, not before: a reply that settles
+    // while the probe is in flight updates S.session, and comparing the server against
+    // the pre-reply count would force a destructive reload of an up-to-date transcript.
+    const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
+    const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
     // Force-reload the whole transcript whenever the visible conversation's
