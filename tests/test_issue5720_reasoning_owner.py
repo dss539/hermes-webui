@@ -406,6 +406,8 @@ global._restoreMessageScrollSnapshotSameFrame=()=>{};
 global.scrollIfPinned=()=>{};
 global._moveLiveRunStatusToTurnEnd=()=>{};
 global._messageUserUnpinned=false;
+global._oldestIdx=0;
+global._messagesTruncated=false;
 global._syncTransparentEventControls=()=>{};
 global._syncToolCallGroupSummary=()=>{};
 global._captureWorklogDetailDisclosureState=()=>null;

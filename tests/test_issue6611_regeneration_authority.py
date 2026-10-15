@@ -14,7 +14,7 @@ from api.session_ops import (
     regeneration_state,
     resolve_regeneration_turn,
 )
-from api.streaming import _session_payload_with_full_messages
+from api.streaming import _redacted_terminal_session_payload, _session_payload_with_full_messages
 from tests.js_source_extract import extract_function
 
 
@@ -34,6 +34,50 @@ def test_all_terminal_payloads_carry_fresh_revision():
     payload = _session_payload_with_full_messages(session)
     assert payload["regeneration_revision"] == regeneration_authority(session, rows=session.messages)
     assert payload["regeneration_revision"] == regeneration_revision_for(session.messages, session=session, context=session.context_messages)
+
+
+def test_bounded_terminal_projection_preserves_only_eligible_revision_for_browser_adoption():
+    session = _session()
+    canonical_rows, canonical_context = regeneration_state(session)
+    revision = regeneration_authority(
+        session,
+        rows=canonical_rows,
+        context=canonical_context,
+        full_transcript=True,
+        canonical_state=(canonical_rows, canonical_context),
+    )
+    assert revision
+
+    payload = _redacted_terminal_session_payload(session)
+    assert payload["messages"] == canonical_rows
+    assert payload["message_count"] == len(canonical_rows)
+    assert payload["regeneration_revision"] == revision
+
+    ineligible = _session()
+    ineligible.active_stream_id = "still-running"
+    ineligible_payload = _redacted_terminal_session_payload(ineligible)
+    assert "regeneration_revision" not in ineligible_payload
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required")
+    adopter = extract_function(
+        (ROOT / "static" / "sessions.js").read_text(encoding="utf-8"),
+        "_adoptRegenerationRevision",
+    )
+    script = f"""
+const assert=require('node:assert/strict');
+let S={{session:{{session_id:{json.dumps(session.session_id)},regeneration_revision:'stale'}}}};
+const adopt=eval('(' + {json.dumps(adopter)} + ')');
+adopt({json.dumps(payload)});
+assert.equal(S.session.regeneration_revision,{json.dumps(revision)});
+S.session.regeneration_revision='stale';
+adopt({json.dumps(ineligible_payload)});
+assert.equal(Object.hasOwn(S.session,'regeneration_revision'),false);
+process.stdout.write('ok');
+"""
+    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=True)
+    assert result.stdout == "ok"
 
 
 def test_get_revision_consumer_delegates_imported_ownership_to_shared_authority():
@@ -409,6 +453,67 @@ def test_terminal_payload_embeds_the_rows_it_hashes(monkeypatch):
         rows=canonical_rows,
         context=canonical_context,
     )
+
+
+def test_real_terminal_payload_rebases_tool_owner_after_state_db_insert(monkeypatch, tmp_path):
+    from api import models
+
+    sidecar_rows = []
+    for index in range(32):
+        role = "user" if index % 2 == 0 else "assistant"
+        row = {
+            "role": role,
+            "content": f"sidecar-{index}",
+            "timestamp": 100.0 + index,
+        }
+        if role == "user":
+            row["_source"] = "webui"
+        sidecar_rows.append(row)
+
+    owner_row = sidecar_rows[5]
+    assert owner_row["role"] == "assistant"
+    tool_calls = [{"id": "retained-owner", "assistant_msg_idx": 5}]
+    inserted_row = {
+        "role": "user",
+        "content": "state-only earlier user",
+        "timestamp": 102.5,
+    }
+    db = _make_state_db(tmp_path, [*sidecar_rows, inserted_row])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    session = Session(
+        session_id="s1",
+        messages=sidecar_rows,
+        context_messages=sidecar_rows,
+        tool_calls=[dict(card) for card in tool_calls],
+    )
+
+    full_payload = _session_payload_with_full_messages(session)
+    canonical_rows = full_payload["messages"]
+    inserted_index = next(
+        index for index, row in enumerate(canonical_rows)
+        if row.get("content") == "state-only earlier user"
+    )
+    owner_index = next(
+        index for index, row in enumerate(canonical_rows)
+        if row is owner_row
+    )
+    assert inserted_index == 3
+    assert owner_index == 6
+    assert inserted_index < owner_index
+    assert canonical_rows[owner_index] is owner_row
+    assert full_payload["regeneration_revision"]
+
+    payload = _redacted_terminal_session_payload(session)
+    assert payload["regeneration_revision"] == full_payload["regeneration_revision"]
+    assert payload["message_count"] == 33
+    assert payload["_messages_offset"] == 3
+    assert payload["_messages_offset"] + len(payload["messages"]) == payload["message_count"]
+    assert owner_index >= payload["_messages_offset"]
+    relative_owner_index = owner_index - payload["_messages_offset"]
+    assert payload["tool_calls"] == [
+        {"id": "retained-owner", "assistant_msg_idx": relative_owner_index}
+    ]
+    assert session.tool_calls == tool_calls
 
 
 def test_recovered_display_context_pair_survives_local_and_gateway_apply(monkeypatch):
