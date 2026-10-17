@@ -761,8 +761,7 @@ function _readPersistedSessionCompletionUnreadCleared() {
     for (const key of keys) {
       const parsed = _parseSessionCompletionUnreadClearedKey(key);
       if (!parsed) continue;
-      const storedValue = Number(localStorage.getItem(key)) || 0;
-      const value = parsed.version || storedValue;
+      const value = parsed.version || Number(localStorage.getItem(key)) || 0;
       if (value > (Number(cleared[parsed.sid]) || 0)) cleared[parsed.sid] = value;
     }
   } catch (_) {
@@ -788,8 +787,33 @@ function _readSessionCompletionUnreadCleared() {
   return cleared;
 }
 
+// A per-session intent needs only that session's ordering facts. Snapshot the
+// keys at the intent boundary just like the full-map reader, but do not decode
+// or read the values of unrelated versioned records.
+function _readSessionCompletionUnreadClearForSession(sid){
+  let keys=[];
+  try{ keys=Array.from({length:localStorage.length},(_,i)=>localStorage.key(i)); }catch(_){}
+  let order=Number(_readStoredJsonMap(SESSION_COMPLETION_UNREAD_CLEARED_KEY)[sid])||0;
+  const base=_sessionCompletionUnreadClearedKey(sid);
+  for(const key of keys){
+    if(key!==base && !(key&&key.startsWith(base+':'))) continue;
+    const version=key===base?0:Number(key.slice(base.length+1))||0;
+    if(key!==base && key.slice(base.length+1).includes(':')) continue;
+    let value=version;
+    if(!value){try{value=Number(localStorage.getItem(key))||0;}catch(_){}}
+    order=Math.max(order,value);
+  }
+  const memory=_sessionCompletionUnreadClearedMemory[sid];
+  if(memory){
+    if(memory.recorded_at && Date.now()-memory.recorded_at>SESSION_COMPLETION_UNREAD_CLEARED_TTL_MS){
+      delete _sessionCompletionUnreadClearedMemory[sid];
+    }else order=Math.max(order,Number(memory.order)||0);
+  }
+  return {[sid]:order};
+}
+
 function _nextSessionCompletionUnreadOrder(sid, cleared = null) {
-  const clears = cleared || _readSessionCompletionUnreadCleared();
+  const clears = cleared || _readSessionCompletionUnreadClearForSession(sid);
   const cached = _getSessionCompletionUnread()[sid];
   const stored = _readStoredJsonMap(SESSION_COMPLETION_UNREAD_KEY)[sid];
   return Math.max(
@@ -6433,7 +6457,9 @@ function _applySessionListPayload(sessData, projData, opts){
   ensureSessionTimeRefreshPoll();
   ensureActiveSessionExternalRefreshPoll();
   if(!_sessionListFirstRenderAnimated&&Array.isArray(_allSessions)&&_allSessions.length){
-    animateNextSessionListRefresh({enterAll:true});
+    // Last-known rows already entered. Reconciliation must not invalidate every
+    // otherwise reusable row just to animate a second entrance.
+    if(!(typeof _sidebarShowingLastKnown!=='undefined' && _sidebarShowingLastKnown)) animateNextSessionListRefresh({enterAll:true});
     _sessionListFirstRenderAnimated=true;
   }
   ensureSessionEventsSSE();
@@ -6462,10 +6488,16 @@ function _applySessionListPayload(sessData, projData, opts){
     // Preserve the per-refresh INFLIGHT cleanup that renderSessionListFromCache
     // would otherwise perform, then skip only the DOM rebuild.
     if(typeof _purgeStaleInflightEntries==='function') _purgeStaleInflightEntries();
+    if(typeof _sessionListPaintJob!=='undefined' && _sessionListPaintJob) return _sessionListPaintJob.completion;
     return;
   }
-  if(_canRenderNow) _lastSessionListRenderSig = _renderSig;
-  renderSessionListFromCache();  // no-ops if rename is in progress
+  const paintedSessions=_allSessions;
+  const paint=renderSessionListFromCache();  // no-ops if rename is in progress
+  if(paint && typeof paint.then==='function') return paint.then(completed=>{
+    if(completed && _canRenderNow && _allSessions===paintedSessions) _lastSessionListRenderSig=_renderSig;
+  });
+  if(_canRenderNow) _lastSessionListRenderSig=_renderSig;
+  return paint;
 }
 
 function _mergeRenderSessionListOptions(prev, next){
@@ -6600,13 +6632,16 @@ async function _runRenderSessionListRefresh(opts, _gen){
     if (_profileSwitchListEmbargo) return;
     if(Number.isFinite(serverTime) && serverTime>0) _serverTimeDelta=Date.now()-serverTime*1000;
     if(unchanged && !_sessionListLoadError && !_sessionListSkeletonActive
-      && JSON.stringify(projData.projects||[])===JSON.stringify(_allProjects||[])) return;
+      && JSON.stringify(projData.projects||[])===JSON.stringify(_allProjects||[])){
+      if(typeof _sessionListPaintJob!=='undefined' && _sessionListPaintJob) await _sessionListPaintJob.completion;
+      return;
+    }
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
       _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};
       _schedulePendingSessionListApply();
       return;
     }
-    _applySessionListPayload(sessData,projData,{unreadGen});
+    await _applySessionListPayload(sessData,projData,{unreadGen});
   }catch(e){
     if (_gen !== _renderSessionListGen) return;
     // #4671: same embargo guard as the success path — a mid-switch /api/sessions that
@@ -6654,6 +6689,7 @@ let _sidebarShowingLastKnown = false;
 const _SIDEBAR_BOOT_CACHE_KEY = 'hermes-webui-sidebar-last-known-v1';
 let _sidebarBootCacheAttempted = false;
 let _sidebarBootCacheSaveTimer = 0;
+let _sidebarBootCacheSaveGeneration = 0;
 
 function _recordSidebarProjection(sessData){
   _sidebarShowingLastKnown=false;
@@ -6709,8 +6745,15 @@ function _restoreSidebarBootCache(sessionListQS){
 function _saveSidebarBootCache(sessData){
   if(_sidebarBootCacheSaveTimer) clearTimeout(_sidebarBootCacheSaveTimer);
   const scope=_sidebarSessionScopeKey(_sessionListQueryString());
-  _sidebarBootCacheSaveTimer=setTimeout(()=>{
+  const generation=++_sidebarBootCacheSaveGeneration;
+  _sidebarBootCacheSaveTimer=setTimeout(async()=>{
     _sidebarBootCacheSaveTimer=0;
+    // Persistence is not part of the first paint. In particular it must not
+    // preempt the remaining row slices with a large JSON serialization.
+    if(typeof _sessionListPaintJob!=='undefined' && _sessionListPaintJob){
+      try{await _sessionListPaintJob.completion;}catch(_){return;}
+    }
+    if(generation!==_sidebarBootCacheSaveGeneration) return;
     if(scope!==_sidebarSessionScopeKey(_sessionListQueryString()) || !_sessionListHasLoadedOnce
       || _profileSwitchListEmbargo || _sessionListSkeletonActive) return;
     try{
@@ -6897,6 +6940,25 @@ function stopStreamingPoll(){
   _streamingPollTimer = null;
 }
 
+function _refreshSidebarTimeLabels(){
+  // Expanded descendant labels include time in their button text. Keep their
+  // normal render path; the common collapsed view needs no row reconstruction.
+  if(_expandedChildSessionKeys.size || _expandedLineageKeys.size){
+    renderSessionListFromCache();
+    return;
+  }
+  const list=$('sessionList');
+  if(!list) return;
+  if(list.dataset.sessionDateBoundary && Number(list.dataset.sessionDateBoundary)!==_sessionCalendarBoundaries(_serverNowMs()).startOfToday){
+    return renderSessionListFromCache();
+  }
+  for(const label of list.querySelectorAll('.session-time[data-timestamp]')){
+    if(label.classList.contains('is-hidden')) continue;
+    const text=_formatRelativeSessionTime(Number(label.dataset.timestamp));
+    if(label.textContent!==text) label.textContent=text;
+  }
+}
+
 function ensureSessionTimeRefreshPoll(){
   if(_sessionTimeRefreshTimer) return;
   _sessionTimeRefreshTimer = setInterval(() => {
@@ -6907,7 +6969,7 @@ function ensureSessionTimeRefreshPoll(){
   }, _sessionTimeRefreshMs);
   if(typeof document !== 'undefined' && !_sessionTimeRefreshVisibilityHandler){
     _sessionTimeRefreshVisibilityHandler = () => {
-      if(!document.hidden) renderSessionListFromCache();
+      if(!document.hidden) _refreshSidebarTimeLabels();
     };
     document.addEventListener('visibilitychange', _sessionTimeRefreshVisibilityHandler);
   }
@@ -7831,19 +7893,25 @@ function _localDayOrdinal(timestampMs) {
 
 function _sessionCalendarBoundaries(nowMs) {
   nowMs = nowMs || _serverNowMs();
+  const cached=_sessionCalendarBoundaries._cache;
   const now = new Date(nowMs);
+  if(cached && nowMs>=cached.value.startOfToday && nowMs<cached.until
+    && now.getTimezoneOffset()===cached.offset) return cached.value;
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const startOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
   const startOfWeek = new Date(startOfToday);
   startOfWeek.setDate(startOfWeek.getDate() - ((startOfWeek.getDay() + 6) % 7));
   const startOfLastWeek = new Date(startOfWeek);
   startOfLastWeek.setDate(startOfLastWeek.getDate() - 7);
-  return {
+  const value={
     startOfToday: startOfToday.getTime(),
     startOfYesterday: startOfYesterday.getTime(),
     startOfWeek: startOfWeek.getTime(),
     startOfLastWeek: startOfLastWeek.getTime(),
   };
+  _sessionCalendarBoundaries._cache={value,offset:now.getTimezoneOffset(),
+    until:new Date(now.getFullYear(),now.getMonth(),now.getDate()+1).getTime()};
+  return value;
 }
 
 function _formatSessionDate(timestampMs, nowMs) {
@@ -8892,6 +8960,34 @@ function _attachProjectQuickCreateButton(chip, project){
 
 // Retain only the current virtual window, not one DOM row per stored session.
 let _sessionRowDomCache = new Map();
+let _sessionListPaintJob = null;
+
+function _flushSidebarUnreadBaselineBatch(baselineBatch){
+  if(!baselineBatch.dirty) return;
+  // Preserve each immediate clear and the original-order quota retry. A chunk
+  // releases its shared batch before yielding, so no unrelated event joins it.
+  _writeSessionCompletionUnreadCleared([],0);
+  for(const [sid,order] of baselineBatch.clears) _writeSessionCompletionUnreadCleared(sid,order,true);
+  _writeSessionCompletionUnreadCleared([],0);
+  _saveSessionViewedCounts();
+  const before=JSON.stringify(_getSessionCompletionUnread());
+  _saveSessionCompletionUnread();
+  if(JSON.stringify(_getSessionCompletionUnread())!==before) renderSessionListFromCache();
+}
+
+function _scheduleSidebarPaintTask(callback){
+  // postTask avoids the nested-timer clamp without retaining a long task. Each
+  // callback still releases the thread for input/rendering before the next slice.
+  if(globalThis.scheduler && typeof scheduler.postTask==='function' && typeof TaskController!=='undefined'){
+    const controller=new TaskController({priority:'user-blocking'});
+    scheduler.postTask(callback,{signal:controller.signal}).catch(error=>{
+      if(error.name!=='AbortError') console.error('Sidebar paint failed',error);
+    });
+    return ()=>controller.abort();
+  }
+  const timer=setTimeout(callback,0);
+  return ()=>clearTimeout(timer);
+}
 
 function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
@@ -8909,6 +9005,12 @@ function renderSessionListFromCache(){
   // all call this while the fixed-position menu is open; rebuilding the row DOM
   // here removes the anchor and makes the menu feel unclickable.
   if(_sessionActionMenu) return;
+  if(typeof _sessionListPaintJob!=='undefined' && _sessionListPaintJob){
+    _sessionListPaintJob.cancel();
+    _sessionListPaintJob=null;
+  }
+  const paintStarted=typeof performance!=='undefined'?performance.now():0;
+  const pendingRows=[];
   const previousBaselineBatch=typeof _sidebarUnreadBaselineBatch!=='undefined'?_sidebarUnreadBaselineBatch:null;
   const baselineBatch=previousBaselineBatch||{dirty:false,clears:new Map()};
   if(typeof _sidebarUnreadBaselineBatch!=='undefined') _sidebarUnreadBaselineBatch=baselineBatch;
@@ -8969,7 +9071,6 @@ function renderSessionListFromCache(){
   const previousRowCache=typeof _sessionRowDomCache!=='undefined'?_sessionRowDomCache:new Map();
   const nextRowCache=new Map();
   const rowContext=JSON.stringify([
-    typeof _sidebarShowingLastKnown!=='undefined' && _sidebarShowingLastKnown,
     searchQueryRaw, !!_sessionSelectMode, [..._selectedSessions],
     window._sidebarDensity, !!_showAllProfiles, _allProjects,
     document.documentElement.lang, Math.floor(_serverNowMs()/60000),
@@ -9169,6 +9270,7 @@ function renderSessionListFromCache(){
   const unpinned=orderedSessions.filter(s=>!s.pinned);
   // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
+  list.dataset.sessionDateBoundary=String(_sessionCalendarBoundaries(now).startOfToday);
   // Collapse state: in-memory authority, localStorage as best-effort
   // persistence. If the write fails (quota, blocked storage) the toggle must
   // still take effect for this session instead of silently reverting (#7953).
@@ -9325,7 +9427,16 @@ function renderSessionListFromCache(){
       if(isGroupCollapsed) continue;
       const rowIndex=globalSessionRowIndex++;
       const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
-      if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
+      if(inWindow){
+        // Keep warm keyed rows synchronous. Cold/new rows outside the first
+        // small slice become height-preserving slots and fill across tasks.
+        const canSchedule=typeof performance!=='undefined' && typeof _sessionListPaintJob!=='undefined';
+        if(canSchedule && performance.now()-paintStarted>=24){
+          const slot=_sessionVirtualSpacer(virtualWindow.itemHeight,'pending');
+          body.appendChild(slot);
+          pendingRows.push({s,isPinnedGroup:Boolean(g.isPinned),slot,rowIndex});
+        }else body.appendChild(_renderOneSession(s, Boolean(g.isPinned)));
+      }
       else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
       else { groupBottomPad+=virtualWindow.itemHeight; }
     }
@@ -9378,6 +9489,56 @@ function renderSessionListFromCache(){
   const reflowBefore=animateRefresh?flipBefore:_pendingSessionReflowPositions;
   const reflowTimeout=animateRefresh?SESSION_LIST_FLIP_TIMEOUT_MS:SESSION_REFLOW_TIMEOUT_MS;
   _pendingSessionReflowPositions=null;
+  if(pendingRows.length){
+    // Fill visible slots before overscan, without changing their DOM order.
+    const firstVisible=Math.floor((virtualAnchorScrollTop===null?listScrollTopBeforeRender:virtualAnchorScrollTop)/virtualWindow.itemHeight);
+    const lastVisible=firstVisible+Math.ceil((list.clientHeight||520)/virtualWindow.itemHeight);
+    const distance=r=>r.rowIndex<firstVisible?firstVisible-r.rowIndex:(r.rowIndex>lastVisible?r.rowIndex-lastVisible:0);
+    pendingRows.sort((a,b)=>distance(a)-distance(b)||a.rowIndex-b.rowIndex);
+    const sessionsAtStart=_allSessions;
+    let resolvePaint,rejectPaint;
+    const completion=new Promise((resolve,reject)=>{resolvePaint=resolve;rejectPaint=reject;});
+    const job={completion,cancelTask:null,cancel(error){
+      if(job.cancelTask) job.cancelTask();
+      if(_sessionListPaintJob===job){
+        _sessionListPaintJob=null;
+        delete list.dataset.paintPending;
+        if(!(typeof _sidebarShowingLastKnown!=='undefined' && _sidebarShowingLastKnown)) list.removeAttribute('aria-busy');
+      }
+      if(error) rejectPaint(error); else resolvePaint(pendingRows.length===0);
+    }};
+    _sessionListPaintJob=job;
+    list.dataset.paintPending='true';list.setAttribute('aria-busy','true');
+    const fill=()=>{
+      try{
+      if(_sessionListPaintJob!==job) return;
+      if(_sessionListSkeletonActive || _allSessions!==sessionsAtStart){job.cancel();return;}
+      // Slots do not own any interaction. Replacing them never moves an open
+      // menu's anchor or an input in a different, already-mounted row.
+      const previous=typeof _sidebarUnreadBaselineBatch!=='undefined'?_sidebarUnreadBaselineBatch:null;
+      const batch=previous||{dirty:false,clears:new Map()};
+      if(typeof _sidebarUnreadBaselineBatch!=='undefined') _sidebarUnreadBaselineBatch=batch;
+      const started=performance.now();
+      try{
+        do{
+          const row=pendingRows.shift();
+          if(row.slot.isConnected) row.slot.replaceWith(_renderOneSession(row.s,row.isPinnedGroup));
+        }while(pendingRows.length && performance.now()-started<8);
+      }finally{
+        if(typeof _sidebarUnreadBaselineBatch!=='undefined') _sidebarUnreadBaselineBatch=previous;
+        if(!previous) _flushSidebarUnreadBaselineBatch(batch);
+      }
+      if(_sessionListPaintJob!==job) return;
+      if(pendingRows.length) job.cancelTask=_scheduleSidebarPaintTask(fill);
+      else{
+        job.cancel();
+        _playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);
+      }
+      }catch(error){job.cancel(error);}
+    };
+    job.cancelTask=_scheduleSidebarPaintTask(fill);
+    return completion;
+  }
   _playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);
 
   function _renderOneSession(s, isPinnedGroup=false){
@@ -9398,11 +9559,11 @@ function renderSessionListFromCache(){
       &&!searchQueryRaw&&!_sessionSwipeReturnOffsets.has(s.session_id);
     let rowSig=null;
     if(canReuse){
-      try{ rowSig=JSON.stringify([s,rowContext,isPinnedGroup,isActive,ownStreaming,hasUnread,attention]); }
+      try{ rowSig=JSON.stringify([s,isPinnedGroup,isActive,ownStreaming,hasUnread,attention]); }
       catch(_){ /* Unserializable client metadata must render, never block paint. */ }
     }
     const cached=previousRowCache.get(s.session_id);
-    if(rowSig&&cached&&cached.sig===rowSig
+    if(rowSig&&cached&&cached.sig===rowSig&&cached.context===rowContext
       &&!cached.el.matches('.dragging,.long-pressing,.swipe-committed,.swipe-removing,.session-swipe-returning,.session-list-flip-enter')){
       nextRowCache.set(s.session_id,cached);
       return cached.el;
@@ -9490,6 +9651,7 @@ function renderSessionListFromCache(){
     const ts=document.createElement('span');
     const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
+    ts.dataset.timestamp=String(tsMs);
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
     // Project color dot: placed BETWEEN title and timestamp, not inside the
@@ -10022,12 +10184,17 @@ function renderSessionListFromCache(){
       _openSessionActionMenu(s, actions||el);
     };
 
-    if(!readOnly){
+    // Swipe decoration is invisible until a touch/pen gesture. Construct it
+    // once on gesture start, not twice for every newly mounted sidebar row.
+    let _swipeAffordancesReady=false;
+    const _ensureSwipeAffordances=()=>{
+      if(readOnly||_swipeAffordancesReady) return;
+      _swipeAffordancesReady=true;
       el.append(
         _makeSessionSwipeAffordance('right',s.archived?'undo':'archive',s.archived?'Restore':t('session_batch_archive')),
         _makeSessionSwipeAffordance('left','trash-2',t('session_batch_delete')),
       );
-    }
+    };
 
     // Use release events + manual double-tap detection instead of onclick/ondblclick.
     // onclick/ondblclick are unreliable on touch devices (iPad Safari especially):
@@ -10053,6 +10220,7 @@ function renderSessionListFromCache(){
       if(!_longPressMenuOpened) el.classList.remove('long-pressing');
     };
     const _beginSessionGesture=(clientX,clientY,pointerType='')=>{
+      if(pointerType!=='mouse') _ensureSwipeAffordances();
       _gesturePointerType=pointerType;
       _pointerDownX=clientX;
       _pointerDownY=clientY;
@@ -10359,25 +10527,12 @@ function renderSessionListFromCache(){
       if(!touch) return;
       if(_finishSessionGesture(touch.clientX,touch.clientY,e.target,'touch')) e.stopPropagation();
     },{passive:true});
-    if(rowSig) nextRowCache.set(s.session_id,{sig:rowSig,el});
+    if(rowSig) nextRowCache.set(s.session_id,{sig:rowSig,context:rowContext,el});
     return el;
   }
   }finally{
     if(typeof _sidebarUnreadBaselineBatch!=='undefined') _sidebarUnreadBaselineBatch=previousBaselineBatch;
-    if(!previousBaselineBatch&&baselineBatch.dirty){
-      // Each clear was already written at its original per-session intent.
-      // Retain the quota/pruning and cross-tab max/clear-wins merges, once per
-      // paint instead of once per previously-unseen visible row.
-      _writeSessionCompletionUnreadCleared([],0);
-      // If quota rejected an immediate clear, pruning may have made room.
-      // Retry the exact captured order, never a later logical clear.
-      for(const [sid,order] of baselineBatch.clears) _writeSessionCompletionUnreadCleared(sid,order,true);
-      _writeSessionCompletionUnreadCleared([],0);
-      _saveSessionViewedCounts();
-      const before=JSON.stringify(_getSessionCompletionUnread());
-      _saveSessionCompletionUnread();
-      if(JSON.stringify(_getSessionCompletionUnread())!==before) renderSessionListFromCache();
-    }
+    if(!previousBaselineBatch) _flushSidebarUnreadBaselineBatch(baselineBatch);
   }
 }
 

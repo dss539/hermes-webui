@@ -209,6 +209,23 @@ assert.equal(writes,1);
 ''')
 
 
+def test_boot_persistence_waits_for_paint_and_newest_payload_wins():
+    node(BOOT_ENV+boot_source()+'''
+let release;
+let _sessionListPaintJob={completion:new Promise(r=>release=r)};
+(async()=>{
+ _sessionListHasLoadedOnce=true;
+ _saveSidebarBootCache({sessions:[{session_id:'obsolete'}]});
+ await new Promise(r=>setTimeout(r,10));
+ assert.equal(stored,null,'persistence preempted paint');
+ _saveSidebarBootCache({sessions:[{session_id:'newest'}]});
+ await new Promise(r=>setTimeout(r,10));assert.equal(stored,null);
+ release();await new Promise(r=>setTimeout(r,10));
+ assert.equal(JSON.parse(stored).sessions[0].session_id,'newest');
+})().catch(e=>{console.error(e);process.exitCode=1});
+''')
+
+
 def test_boot_persistence_uses_server_metadata_not_local_optimism():
     node(BOOT_ENV+boot_source()+'''
 (async()=>{

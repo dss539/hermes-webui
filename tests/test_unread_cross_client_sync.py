@@ -127,6 +127,7 @@ _HELPER_FNS = [
     "_parseSessionCompletionUnreadClearedKey",
     "_readPersistedSessionCompletionUnreadCleared",
     "_readSessionCompletionUnreadCleared",
+    "_readSessionCompletionUnreadClearForSession",
     "_mergeSessionCompletionUnread",
     "_writeSessionCompletionUnreadCleared",
 ]
