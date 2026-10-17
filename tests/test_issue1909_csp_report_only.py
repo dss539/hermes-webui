@@ -33,6 +33,10 @@ def test_handler_adds_content_security_policy_report_only(monkeypatch):
         "max_age": 10886400,
         "endpoints": [{"url": "/api/csp-report"}],
     }
+    # Tab crash reports and CSP report-to go to the same unauthenticated collector.
+    assert headers["Reporting-Endpoints"] == (
+        'csp-endpoint="/api/csp-report", crash-reporting="/api/csp-report"'
+    )
 
 
 def test_csp_report_only_keeps_legacy_inline_allowances_for_current_ui():

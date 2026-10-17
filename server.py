@@ -343,7 +343,7 @@ class Handler(BaseHTTPRequestHandler):
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         extra_img_src = getattr(self, "_csp_extra_img_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src, extra_img_src))
-        self.send_header("Report-To", self._CSP_REPORT_TO)
+        self.send_header("Report-To", self._CSP_REPORT_TO); self.send_header("Reporting-Endpoints", 'csp-endpoint="/api/csp-report", crash-reporting="/api/csp-report"')
         advertise_connection_close(self)  # tell the client when the socket dies
         super().end_headers()
 
