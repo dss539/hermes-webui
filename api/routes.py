@@ -2840,6 +2840,7 @@ def _get_cached_session_list_payload(
                     rebuild_attempts = 0
                     while True:
                         invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                        source_stamp = _route_session_list_cache._session_list_cache_resolved_source_stamp(key)
                         try:
                             payload = builder()
                         except Exception:
@@ -2853,6 +2854,7 @@ def _get_cached_session_list_payload(
                                 key,
                                 payload,
                                 expected_invalidation_stamp=invalidation_stamp,
+                                expected_source_stamp=source_stamp,
                             )
                         ):
                             return
@@ -2889,6 +2891,7 @@ def _get_cached_session_list_payload(
             rebuild_attempts = 0
             while True:
                 invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+                source_stamp = _route_session_list_cache._session_list_cache_resolved_source_stamp(key)
                 payload = builder()
                 if (
                     _session_list_cache_invalidation_stamp(key) == invalidation_stamp
@@ -2896,6 +2899,7 @@ def _get_cached_session_list_payload(
                         key,
                         payload,
                         expected_invalidation_stamp=invalidation_stamp,
+                        expected_source_stamp=source_stamp,
                     )
                 ):
                     if diag is not None:
@@ -2954,12 +2958,14 @@ def _get_cached_session_list_payload(
         except Exception:
             pass
     invalidation_stamp = _session_list_cache_invalidation_stamp(key)
+    source_stamp = _route_session_list_cache._session_list_cache_resolved_source_stamp(key)
     payload = builder()
     if _session_list_cache_invalidation_stamp(key) == invalidation_stamp:
         _session_list_cache_set(
             key,
             payload,
             expected_invalidation_stamp=invalidation_stamp,
+            expected_source_stamp=source_stamp,
         )
     return payload
 

@@ -279,11 +279,21 @@ def _has_cli_lineage(row: dict) -> bool:
     return segment_count > 1 or bool(row.get("_lineage_root_id"))
 
 
+_NON_CLI_SOURCES = MESSAGING_SOURCES | {
+    'cron', 'webhook', 'kanban', 'tool', 'api', 'api_server', 'subagent',
+}
+
+
 def is_cli_session_row(row: dict) -> bool:
     """Return True for rows that should be treated as CLI-imported sessions."""
     if not isinstance(row, dict):
         return False
     source = _safe_lower(row.get("session_source"))
+    # These authoritative values always returned False, regardless of every
+    # remaining source field. Most all-profile rows are background sessions;
+    # avoid normalizing four more fields and allocating two sets for each.
+    if source in _NON_CLI_SOURCES or source in {'webui', 'messaging'}:
+        return False
     source_tag = _safe_lower(row.get("source_tag"))
     raw_source = _safe_lower(row.get("raw_source"))
     source_name = _safe_lower(row.get("source"))
@@ -294,8 +304,7 @@ def is_cli_session_row(row: dict) -> bool:
     # runner, never a writable WebUI/CLI session (#5307). Classify it non-CLI so
     # sidebar rows and every is_cli_session_row() consumer keep it out of the
     # CLI/writable treatment.
-    non_cli_sources = MESSAGING_SOURCES | {"cron", "webhook", "kanban", "tool", "api", "api_server", "subagent"}
-    if {source, source_tag, raw_source, source_name, source_label} & non_cli_sources:
+    if {source, source_tag, raw_source, source_name, source_label} & _NON_CLI_SOURCES:
         return False
     if source == "messaging":
         return False
@@ -981,6 +990,25 @@ def read_importable_agent_session_rows(
                 "                    ) DESC,\n"
                 "                    s.started_at DESC"
             )
+
+        if use_messages_join and messages_has_timestamp and messages_index_present:
+            # Aggregate narrow indexed message rows, not a joined copy of every
+            # session column per message. MAX uses the timestamp covering index;
+            # COUNT uses a covering session index. Only the role count reads the
+            # message table. Keep the join fallback for unindexed/older schemas.
+            actual_count_expr = (
+                f"(SELECT COUNT(mx.{count_col}) FROM messages mx WHERE mx.session_id = s.id)"
+            )
+            user_message_count_expr = (
+                "(SELECT COUNT(*) FROM messages mx WHERE mx.session_id = s.id AND LOWER(mx.role) = 'user')"
+                if 'role' in message_cols else actual_count_expr
+            )
+            last_activity_expr = "(SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id)"
+            join_clause = ""
+            group_by_clause = ""
+            # The grouped query visits equal-activity rows in id order. Preserve
+            # that tie order when the GROUP BY is no longer necessary.
+            order_by_clause = "ORDER BY COALESCE(last_activity, s.started_at) DESC, s.id"
 
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
