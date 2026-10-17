@@ -8775,7 +8775,27 @@ def clear_cli_sessions_cache() -> None:
 
 
 def _copy_cli_sessions(sessions: list) -> list:
-    return copy.deepcopy(sessions)
+    """Isolate request mutations without deepcopy-dispatching every scalar.
+
+    These are JSON metadata rows (thousands of rows on established installs).
+    Preserve deep isolation for every non-scalar value, including unknown future
+    fields, and retain shared/cyclic references with deepcopy's memo.
+    """
+    if type(sessions) is not list or any(type(row) is not dict for row in sessions):
+        return copy.deepcopy(sessions)
+    result = []
+    scalar_types = {str, int, float, bool, type(None)}
+    memo = {id(sessions): result}
+    for row in sessions:
+        item = memo.get(id(row))
+        if item is None:
+            item = {}
+            memo[id(row)] = item
+            for key, value in row.items():
+                copied_key = key if type(key) is str else copy.deepcopy(key, memo)
+                item[copied_key] = value if type(value) in scalar_types else copy.deepcopy(value, memo)
+        result.append(item)
+    return result
 
 
 def _cli_sessions_cache_invalidation_stamp() -> int:
@@ -8838,9 +8858,11 @@ def _cache_cli_sessions_if_current(
             copied_sessions,
         )
         stable_key = _cli_sessions_stable_cache_identity(cache_key)
+        # Both caches own the same immutable internal snapshot. Every reader
+        # copies before returning it; cache maintenance replaces, never mutates it.
         _CLI_SESSIONS_LAST_KNOWN_GOOD[stable_key] = (
             invalidation_stamp,
-            _copy_cli_sessions(copied_sessions),
+            copied_sessions,
         )
         _CLI_SESSIONS_LAST_KNOWN_GOOD.move_to_end(stable_key)
         while len(_CLI_SESSIONS_LAST_KNOWN_GOOD) > _CLI_SESSIONS_LAST_KNOWN_GOOD_MAX_ENTRIES:
