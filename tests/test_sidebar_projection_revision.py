@@ -158,6 +158,33 @@ def test_sqlite_revision_readers_are_bounded_and_readonly(tmp_path, monkeypatch)
         for entry in readers.values():entry[2].close()
 
 
+@pytest.mark.parametrize('all_profiles,source,expected', [
+    (True, 'webui', 'current'),
+    (False, 'webui', 'old'),
+    (True, 'cli', 'old'),
+    (False, None, 'old'),
+])
+def test_source_changed_follower_requires_current_rows_in_webui_scope(
+    monkeypatch, all_profiles, source, expected,
+):
+    import threading
+    cache._session_list_cache_clear()
+    revision = [0]
+    monkeypatch.setattr(cache, '_session_list_cache_resolved_source_stamp', lambda k: tuple(revision))
+    key = routes._session_list_cache_key(
+        'default', all_profiles, False, False, False,
+        sidebar_source=source, exclude_hidden=True,
+    )
+    cache._session_list_cache_set(key, {'sessions': [{'session_id': 'old'}]})
+    revision[0] += 1
+    monkeypatch.setattr(routes, '_session_list_cache_claim_rebuild', lambda k: (threading.Event(), False))
+    monkeypatch.setattr(routes, '_SESSIONS_CACHE_STALE_WAIT_SECONDS', 0)
+    result = routes._get_cached_session_list_payload(
+        key=key, builder=lambda: {'sessions': [{'session_id': 'current'}]},
+    )
+    assert result['sessions'][0]['session_id'] == expected
+
+
 def test_same_tick_refresh_burst_fetches_once_and_later_call_still_wins():
     source = (Path(routes.__file__).parents[1] / 'static/sessions.js').read_text()
     start = source.index('async function _drainRenderSessionListQueue(')
