@@ -9512,7 +9512,19 @@ function renderSessionListFromCache(){
     const fill=()=>{
       try{
       if(_sessionListPaintJob!==job) return;
-      if(_sessionListSkeletonActive || _allSessions!==sessionsAtStart){job.cancel();return;}
+      if(_sessionListSkeletonActive){job.cancel();return;}
+      if(_allSessions!==sessionsAtStart){
+        // A menu/rename may have prevented the newer payload's render. Keep
+        // its anchor untouched, then replace obsolete slots once it releases.
+        if(_renamingSid||_sessionActionMenu){
+          const timer=setTimeout(fill,120);
+          job.cancelTask=()=>clearTimeout(timer);
+          return;
+        }
+        job.cancel();
+        renderSessionListFromCache();
+        return;
+      }
       // Slots do not own any interaction. Replacing them never moves an open
       // menu's anchor or an input in a different, already-mounted row.
       const previous=typeof _sidebarUnreadBaselineBatch!=='undefined'?_sidebarUnreadBaselineBatch:null;
