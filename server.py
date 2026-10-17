@@ -331,6 +331,11 @@ class Handler(BaseHTTPRequestHandler):
     _ver_suffix = WEBUI_VERSION.removeprefix('v')
     server_version = ('HermesWebUI/' + _ver_suffix) if _ver_suffix != 'unknown' else 'HermesWebUI'
     _CSP_REPORT_TO = '{"group":"csp-endpoint","max_age":10886400,"endpoints":[{"url":"/api/csp-report"}]}'
+    # Chrome posts a crash report (reason "oom" or "unresponsive" when known) to the
+    # crash-reporting endpoint after a tab dies with "Aw, Snap!". csp-endpoint is named here
+    # too so CSP report-to keeps reaching the same collector when Chrome resolves it against
+    # this header. No "default" endpoint, so deprecation and intervention reports stay off.
+    _REPORTING_ENDPOINTS = 'csp-endpoint="/api/csp-report", crash-reporting="/api/csp-report"'
 
     @classmethod
     def csp_report_only_policy(cls, extra_connect_src=None, extra_frame_src=None, extra_img_src=None) -> str:
@@ -342,6 +347,7 @@ class Handler(BaseHTTPRequestHandler):
         extra_img_src = getattr(self, "_csp_extra_img_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src, extra_img_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
+        self.send_header("Reporting-Endpoints", self._REPORTING_ENDPOINTS)
         advertise_connection_close(self)  # tell the client when the socket dies
         super().end_headers()
 
