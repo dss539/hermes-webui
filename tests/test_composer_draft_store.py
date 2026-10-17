@@ -175,12 +175,66 @@ def test_transcript_save_cannot_revert_a_draft_saved_during_serialization(store,
 
 
 def test_cold_modern_draft_save_does_not_load_transcript(store, monkeypatch):
+    import builtins
+    from pathlib import Path
     s = seed(store)
+    # A modern header is small even when the transcript body is large.
+    s.messages[0]['content'] = 'large transcript body ' * 100_000
+    s.save()
+    transcript = s.path
     models.SESSIONS.clear()
+    models._draft_owner_metadata.cache_clear()
+    real_open, real_io_open = builtins.open, io.open
+    real_read_text, real_read_bytes = Path.read_text, Path.read_bytes
+    reads = []
+
+    class BoundedTranscript:
+        def __init__(self, stream):
+            self.stream = stream
+            self.total = 0
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+        def read(self, size=-1):
+            if size < 0:
+                pytest.fail('draft save read full transcript directly')
+            self.total += size
+            if self.total > models._METADATA_PREFIX_FIRST_STAGE_BYTES:
+                pytest.fail('draft save exceeded modern metadata read budget')
+            reads.append(size)
+            return self.stream.read(size)
+        def __iter__(self):
+            pytest.fail('draft save iterated full transcript')
+        def readline(self, *args):
+            pytest.fail('draft save scanned transcript lines')
+        def readlines(self, *args):
+            pytest.fail('draft save read all transcript lines')
+
+    def guard_open(opener):
+        def guarded(path, *a, **kw):
+            stream = opener(path, *a, **kw)
+            return BoundedTranscript(stream) if isinstance(path, (str, Path)) and Path(path) == transcript else stream
+        return guarded
+
+    def guard_full_read(reader):
+        def guarded(path, *a, **kw):
+            if path == transcript:
+                pytest.fail('draft save read full transcript directly')
+            return reader(path, *a, **kw)
+        return guarded
+
     def no_full_load(*a, **kw):
         pytest.fail('draft save loaded transcript')
     monkeypatch.setattr(Session, 'load', no_full_load)
+    monkeypatch.setattr(Path, 'read_text', guard_full_read(real_read_text))
+    monkeypatch.setattr(Path, 'read_bytes', guard_full_read(real_read_bytes))
+    monkeypatch.setattr(builtins, 'open', guard_open(real_open))
+    monkeypatch.setattr(io, 'open', guard_open(real_io_open))
     post(monkeypatch, s.session_id, text='cold metadata only')
+    assert reads, 'cold request did not exercise the instrumented metadata read'
 
 
 def test_validation_and_partial_file_update(store, monkeypatch):

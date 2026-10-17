@@ -1528,6 +1528,9 @@ class Session:
                  gateway_run=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
+        # Draft ownership is stable across temporary compression snapshots.
+        # Permanent continuation rotation explicitly installs its new identity.
+        self._composer_draft_session_id = self.session_id
         self.title = title
         self.profile = profile
         self.workspace = str(_resolve_path(workspace, profile=profile))
@@ -1666,9 +1669,10 @@ class Session:
         # The small record wins even when empty: clearing must not resurrect a
         # legacy draft embedded in an older transcript snapshot. Resolve it on
         # read so cached, metadata-only and independently loaded objects agree.
-        if not is_safe_session_id(self.session_id):
+        sid = self._composer_draft_session_id
+        if not is_safe_session_id(sid):
             return self.__dict__.get('composer_draft', {})
-        return read_draft(self.path, self.__dict__.get('composer_draft', {}))
+        return read_draft(SESSION_DIR / f'{sid}.json', self.__dict__.get('composer_draft', {}))
 
     @composer_draft.setter
     def composer_draft(self, value):
@@ -1950,6 +1954,7 @@ class Session:
                 # the existing same-session concurrency contract: their unique
                 # temp files may replace the sidecar independently.
                 _safe_replace(tmp, self.path)
+                self._draft_identity_persisted = True
             else:
                 # Publish the sidecar and its sidebar projection as one ordered
                 # operation. _write_session_index() uses this same RLock, so the
@@ -1959,6 +1964,7 @@ class Session:
                 # only the index with its frozen projection.
                 with _INDEX_WRITE_LOCK:
                     _safe_replace(tmp, self.path)
+                    self._draft_identity_persisted = True
                     # Build the sidebar entry from the same guarded transcript
                     # snapshot as the JSON payload. A shallow copy avoids
                     # rebinding/mutating the live Session while keeping message
@@ -2016,6 +2022,7 @@ class Session:
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        session._draft_identity_persisted = True
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -6487,17 +6494,21 @@ def get_session_for_draft(sid):
     """Read draft ownership without transcript recovery or writer side effects."""
     if not is_safe_session_id(sid):
         raise KeyError(sid)
-    with LOCK:
-        cached = SESSIONS.get(sid)
-        if cached is not None and cached.session_id == sid:
-            SESSIONS.move_to_end(sid)
-            return cached
     path = SESSION_DIR / f'{sid}.json'
     try:
         stat = path.stat()
         signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
         data = _draft_owner_metadata(path, signature)
     except FileNotFoundError:
+        # Only unpersisted New Chat shells may use the live fallback. Persisted
+        # owners always come from stat-keyed metadata, even on a full-cache hit.
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            if (cached is not None and cached.session_id == sid
+                    and not getattr(cached, '_draft_identity_persisted', False)
+                    and not getattr(cached, '_loaded_metadata_only', False)):
+                SESSIONS.move_to_end(sid)
+                return cached
         raise KeyError(sid) from None
     if data.get('session_id') != sid:
         raise KeyError(sid)

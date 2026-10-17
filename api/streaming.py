@@ -3023,8 +3023,8 @@ def _cleanup_ephemeral_cancelled_turn(session) -> None:
     session.pending_started_at = None
     session.pending_user_source = None
     try:
-        import pathlib
-        pathlib.Path(session.path).unlink(missing_ok=True)
+        from api.composer_drafts import remove_session_files
+        remove_session_files(session.path)
     except Exception:
         logger.debug("Failed to clean up ephemeral cancelled session", exc_info=True)
 
@@ -13656,8 +13656,9 @@ def _run_agent_streaming(
                 if _checkpoint_stop is not None:
                     _checkpoint_stop.set()
                 try:
-                    import pathlib
-                    pathlib.Path(s.path).unlink(missing_ok=True)
+                    from api.composer_drafts import remove_session_files
+                    with _agent_lock:
+                        remove_session_files(s.path)
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions
@@ -13790,6 +13791,7 @@ def _run_agent_streaming(
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
                     s.session_id = new_sid
+                    s._composer_draft_session_id = new_sid
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
                     # session. On the next request, _run_agent_streaming calls

@@ -16888,6 +16888,8 @@ def handle_post(handler, parsed) -> bool:
             sid = query.get("session_id", [""])[0] if parsed.query else ""
             if not sid:
                 return bad(handler, "session_id is required", 400)
+            if not is_safe_session_id(sid):
+                return bad(handler, "Invalid session_id", 400)
             try:
                 s = get_session_for_draft(sid)
             except KeyError:
@@ -16920,11 +16922,17 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
+        # The cached Session can rotate IDs during compression under another
+        # lock. All draft I/O for this request belongs to the validated sid.
+        from api.composer_drafts import read_draft
+        session_path = SESSION_DIR / f"{sid}.json"
         # New Chat shells have no transcript yet. Persist their identity once,
         # under the existing writer lock; never save an existing transcript.
         # Lock order agrees with deletion: transcript lock -> draft lock.
-        if not s.path.exists():
-            initial_draft = dict(s.composer_draft or {})
+        if not session_path.exists():
+            if getattr(s, '_loaded_metadata_only', False) or getattr(s, '_draft_identity_persisted', False):
+                return bad(handler, "Session not found", 404)
+            initial_draft = dict(read_draft(session_path, s.__dict__.get('composer_draft', {})))
             proposed_draft = dict(initial_draft)
             if text is not None:
                 proposed_draft["text"] = text
@@ -16935,18 +16943,27 @@ def handle_post(handler, parsed) -> bool:
             with _get_session_agent_lock(sid):
                 with LOCK:
                     s = SESSIONS.get(sid)
-                if s is None:
+                if s is None or s._composer_draft_session_id != sid:
                     return bad(handler, "Session not found", 404)
-                if not s.path.exists():
+                if not session_path.exists():
                     s.save(touch_updated_at=False, skip_index=True)
         unchanged = False
-        with draft_lock(s.path):
+        with draft_lock(session_path):
             _draft_mark("acquired_lock")
             # Delete owns the same lock while removing both files. Do not
             # recreate a deleted draft from an object resolved before deletion.
-            if not s.path.exists():
+            if not session_path.exists():
                 return bad(handler, "Session not found", 404)
-            current_draft = dict(s.composer_draft or {})
+            # Re-resolve the legacy fallback at the same fixed identity. A full
+            # cached object may predate an external transcript replacement.
+            try:
+                owner = get_session_for_draft(sid)
+            except KeyError:
+                return bad(handler, "Session not found", 404)
+            source = str(owner.source_tag or owner.raw_source or owner.session_source or '').strip().lower()
+            if source == 'subagent':
+                return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
+            current_draft = dict(read_draft(session_path, owner.__dict__.get('composer_draft', {})))
             next_draft = dict(current_draft)
             if text is not None:
                 next_draft["text"] = text
@@ -16958,9 +16975,8 @@ def handle_post(handler, parsed) -> bool:
                 # Draft persistence is not conversation activity: no transcript
                 # serialization, sidebar index write or updated_at change.
                 _draft_mark("before_save")
-                write_draft(s.path, next_draft)
+                write_draft(session_path, next_draft)
                 _draft_mark("after_save")
-                s.composer_draft = next_draft
             saved_draft = next_draft
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
@@ -17099,7 +17115,7 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            from api.composer_drafts import draft_lock, draft_path
+            from api.composer_drafts import draft_lock, remove_session_files
             with draft_lock(SESSION_DIR / f"{sid}.json"):
                 with LOCK:
                     SESSIONS.pop(sid, None)
@@ -17110,12 +17126,10 @@ def handle_post(handler, parsed) -> bool:
                     return bad(handler, "Invalid session_id", 400)
                 sidecar_deleted = False
                 try:
-                    p.unlink(missing_ok=True)
+                    remove_session_files(p)
                 except Exception:
                     logger.debug("Failed to unlink session file %s", p)
                 sidecar_deleted = not p.exists()
-                if sidecar_deleted:
-                    draft_path(p).unlink(missing_ok=True)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -23716,17 +23730,21 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            from api.composer_drafts import draft_lock, remove_session_files
+            # Match single delete: transcript lock -> draft lock -> cache lock.
+            # Reload under both locks so eligibility cannot race a writer.
+            with _get_session_agent_lock(p.stem), draft_lock(p):
+                s = Session.load(p.stem)
+                if zero_only:
+                    should_delete = s and len(s.messages) == 0
+                else:
+                    should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                if should_delete:
+                    with LOCK:
+                        SESSIONS.pop(p.stem, None)
+                    remove_session_files(p)
+                    cleaned += 1
+                    phase1_removed_ids.add(p.stem)
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
 
@@ -23972,7 +23990,9 @@ def _handle_background(handler, body):
             # clutter the sidebar or SESSION_DIR. The index is pruned on the
             # next rebuild via _index_entry_exists().
             try:
-                (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                from api.composer_drafts import remove_session_files
+                with _get_session_agent_lock(bg_sid):
+                    remove_session_files(SESSION_DIR / f"{bg_sid}.json")
             except Exception:
                 pass
         except Exception:
@@ -24420,7 +24440,8 @@ def _restore_chat_start_entry_sidecar(provenance) -> None:
     if sidecar_unknown:
         raise OSError("chat-start entry sidecar bytes are unavailable")
     if sidecar_bytes is None:
-        sidecar_path.unlink(missing_ok=True)
+        from api.composer_drafts import remove_session_files
+        remove_session_files(sidecar_path)
     else:
         _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
 

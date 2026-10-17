@@ -81,7 +81,7 @@ def test_draft_validation_appears_before_persist():
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     # Anchor on the unique POST-validation comment marker.
     marker_idx = src.find("Stage-326 hardening (per Opus advisor)")
-    persist_idx = src.find("write_draft(s.path, next_draft)")
+    persist_idx = src.find("write_draft(session_path, next_draft)")
     assert marker_idx != -1 and persist_idx != -1, (
         "could not locate validation marker or persist site"
     )
@@ -99,11 +99,13 @@ def test_draft_save_does_not_touch_session_updated_at():
     """
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     route = src.split('if parsed.path == "/api/session/draft":', 1)[1].split('if parsed.path == "/api/session/update":', 1)[0]
-    persist_idx = route.find("write_draft(s.path, next_draft)")
+    persist_idx = route.find("write_draft(session_path, next_draft)")
     assert persist_idx != -1, "composer draft save must use independent persistence"
     # Only first-write shell initialization may save the session. Changed
     # drafts must not touch transcript persistence or sidebar activity at all.
-    changed_block = route[route.index('with draft_lock(s.path):'):]
+    changed_block = route[route.index('with draft_lock(session_path):'):]
+    assert 's.path' not in changed_block
+    assert 's.session_id' not in changed_block
     assert 's.save(' not in changed_block
     assert 'updated_at =' not in changed_block
 
@@ -111,9 +113,9 @@ def test_draft_save_does_not_touch_session_updated_at():
 def test_draft_save_skips_unchanged_payload_before_persist():
     """Duplicate debounced draft POSTs should not rewrite the full session JSON."""
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    draft_idx = src.find('current_draft = dict(s.composer_draft or {})')
+    draft_idx = src.find("current_draft = dict(read_draft(session_path, owner.__dict__.get('composer_draft', {})))")
     unchanged_idx = src.find("if next_draft == current_draft", draft_idx)
-    save_idx = src.find("write_draft(s.path, next_draft)", draft_idx)
+    save_idx = src.find("write_draft(session_path, next_draft)", draft_idx)
 
     assert draft_idx != -1, "draft route should snapshot current composer_draft"
     assert unchanged_idx != -1, "draft route should no-op unchanged normalized payloads"

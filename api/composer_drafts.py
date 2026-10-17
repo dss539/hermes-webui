@@ -1,5 +1,6 @@
 """Small atomic composer records, independent of transcript persistence."""
 import json
+import logging
 import os
 import threading
 import weakref
@@ -25,14 +26,60 @@ def draft_path(session_path: Path) -> Path:
     return session_path.with_suffix('.draft')
 
 
-def read_draft(session_path: Path, fallback=None) -> dict:
-    try:
-        value = json.loads(draft_path(session_path).read_text(encoding='utf-8'))
-    except FileNotFoundError:
-        return fallback if isinstance(fallback, dict) else {}
+def _read_record(path):
+    value = json.loads(path.read_text(encoding='utf-8'))
     if not isinstance(value, dict):
         raise ValueError('Invalid composer draft record')
     return value
+
+
+def read_draft(session_path: Path, fallback=None) -> dict:
+    path = draft_path(session_path)
+    corrupt = path.with_suffix('.draft.corrupt')
+    try:
+        return _read_record(path)
+    except FileNotFoundError:
+        # The quarantine is also an authoritative-empty marker. Renaming a bad
+        # record must not make the next read resurrect an embedded legacy draft.
+        if corrupt.exists():
+            return {}
+        return fallback if isinstance(fallback, dict) else {}
+    except (OSError, ValueError, UnicodeError):
+        logging.getLogger(__name__).warning('Unreadable composer draft %s; treating as empty', path, exc_info=True)
+    # Property reads can occur while a cache/index lock is held. Never wait for
+    # a draft writer (which may need that lock) just to quarantine a bad record.
+    lock = draft_lock(session_path)
+    if not lock.acquire(blocking=False):
+        return {}
+    try:
+        try:
+            # A concurrent atomic write may already have repaired this record.
+            return _read_record(path)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, UnicodeError):
+            try:
+                path.replace(corrupt)
+            except OSError:
+                logging.getLogger(__name__).warning('Failed to quarantine composer draft %s', path, exc_info=True)
+            return {}
+    finally:
+        lock.release()
+
+
+def remove_session_files(session_path: Path) -> None:
+    """Remove an identity and its draft together; caller owns transcript lock.
+
+    Keep draft unlink failure isolated from the remaining session cleanup.
+    """
+    session_path = Path(session_path)
+    with draft_lock(session_path):
+        session_path.unlink(missing_ok=True)
+        for path in (draft_path(session_path), session_path.with_suffix('.draft.corrupt')):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logging.getLogger(__name__).warning('Failed to unlink composer draft %s', path, exc_info=True)
 
 
 def write_draft(session_path: Path, draft: dict) -> None:
