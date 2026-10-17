@@ -8762,7 +8762,7 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     return _state_db_session_source(sid) == "subagent"
 
 
-def _session_is_subagent_view_only(sid: str) -> bool:
+def _session_is_subagent_view_only(sid: str, *, metadata_only=False) -> bool:
     """Return True when ``sid`` is a delegated subagent child by ANY signal —
     state.db source OR a persisted WebUI sidecar tagged subagent.
 
@@ -8776,7 +8776,7 @@ def _session_is_subagent_view_only(sid: str) -> bool:
     if _is_subagent_child_session_id(sid):
         return True
     try:
-        s = get_session(sid)
+        s = get_session_for_draft(sid) if metadata_only else get_session(sid)
     except Exception:
         return False
     src = (
@@ -11137,6 +11137,7 @@ def _keep_latest_messaging_session_per_source(
 from api.models import (
     Session,
     get_session,
+    get_session_for_draft,
     get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
@@ -16875,41 +16876,35 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
 
     if parsed.path == "/api/session/draft":
-        # GET ?session_id=X  → return current draft
-        # POST body          → save draft { session_id, text?, files? }
-        # HTTP method is in handler.command (e.g. "POST", "GET"), parsed has no .method
-        import time as _draft_time
-        _draft_t0 = _draft_time.monotonic()
-        _draft_stages = []
+        from api.composer_drafts import draft_lock, write_draft
+        _draft_t0 = time.monotonic()
+        _draft_stages = [("enter", _draft_t0)]
 
         def _draft_mark(name):
-            _draft_stages.append((name, _draft_time.monotonic()))
-        _draft_mark("enter")
+            _draft_stages.append((name, time.monotonic()))
+
         if handler.command == "GET":
             query = parse_qs(parsed.query)
             sid = query.get("session_id", [""])[0] if parsed.query else ""
             if not sid:
                 return bad(handler, "session_id is required", 400)
             try:
-                s = get_session(sid)
+                s = get_session_for_draft(sid)
             except KeyError:
                 return bad(handler, "Session not found", 404)
-            draft = getattr(s, "composer_draft", {}) or {}
-            return j(handler, {"draft": draft})
-        # POST
+            return j(handler, {"draft": s.composer_draft})
         try:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
-        if _session_is_subagent_view_only(sid):
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session_id", 400)
+        if _session_is_subagent_view_only(sid, metadata_only=True):
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
-        # Stage-326 hardening (per Opus advisor): size + type validation on
-        # the draft inputs. Without this, a misbehaving or malicious client
-        # can persist multi-MB strings into the session JSON on every keystroke
-        # via the 400ms debounced auto-save.
+        # Stage-326 hardening (per Opus advisor): validate before persistence.
         _MAX_DRAFT_TEXT = 50_000  # 50 KB cap on textarea content
         _MAX_DRAFT_FILES = 50  # max number of attached file references
         if text is not None and not isinstance(text, str):
@@ -16921,14 +16916,37 @@ def handle_post(handler, parsed) -> bool:
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
         try:
-            s = get_session(sid)
+            s = get_session_for_draft(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
+        # New Chat shells have no transcript yet. Persist their identity once,
+        # under the existing writer lock; never save an existing transcript.
+        # Lock order agrees with deletion: transcript lock -> draft lock.
+        if not s.path.exists():
+            initial_draft = dict(s.composer_draft or {})
+            proposed_draft = dict(initial_draft)
+            if text is not None:
+                proposed_draft["text"] = text
+            if files is not None:
+                proposed_draft["files"] = files
+            if proposed_draft == initial_draft:
+                return j(handler, {"ok": True, "draft": initial_draft, "unchanged": True})
+            with _get_session_agent_lock(sid):
+                with LOCK:
+                    s = SESSIONS.get(sid)
+                if s is None:
+                    return bad(handler, "Session not found", 404)
+                if not s.path.exists():
+                    s.save(touch_updated_at=False, skip_index=True)
         unchanged = False
-        with _get_session_agent_lock(sid):
+        with draft_lock(s.path):
             _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
+            # Delete owns the same lock while removing both files. Do not
+            # recreate a deleted draft from an object resolved before deletion.
+            if not s.path.exists():
+                return bad(handler, "Session not found", 404)
+            current_draft = dict(s.composer_draft or {})
             next_draft = dict(current_draft)
             if text is not None:
                 next_draft["text"] = text
@@ -16936,17 +16954,14 @@ def handle_post(handler, parsed) -> bool:
                 next_draft["files"] = files
             if next_draft == current_draft:
                 unchanged = True
-                saved_draft = current_draft
             else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
+                # Draft persistence is not conversation activity: no transcript
+                # serialization, sidebar index write or updated_at change.
                 _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
+                write_draft(s.path, next_draft)
                 _draft_mark("after_save")
-                saved_draft = s.composer_draft
+                s.composer_draft = next_draft
+            saved_draft = next_draft
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
@@ -16954,16 +16969,14 @@ def handle_post(handler, parsed) -> bool:
         _draft_mark("before_json")
         j(handler, payload)
         _draft_mark("after_json")
-        _draft_stages.append(("end", _draft_time.monotonic()))
-        if _draft_stages[-1][1] - _draft_t0 > 0.2:
+        if time.monotonic() - _draft_t0 > 0.2:
             parts = " ".join(
-                f"{n}={((t - prev[1]) * 1000):.1f}ms"
-                for (n, t), prev in zip(_draft_stages[1:], _draft_stages[:-1], strict=True)
+                f"{name}={((stamp - previous[1]) * 1000):.1f}ms"
+                for (name, stamp), previous in zip(_draft_stages[1:], _draft_stages[:-1], strict=True)
             )
             handler._safe_webui_print(
                 "[SLOW] /api/session/draft total=%.1fms stages: %s" % (
-                    (_draft_stages[-1][1] - _draft_t0) * 1000,
-                    parts,
+                    (time.monotonic() - _draft_t0) * 1000, parts,
                 )
             )
         return True
@@ -17086,19 +17099,23 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
-            try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
+            from api.composer_drafts import draft_lock, draft_path
+            with draft_lock(SESSION_DIR / f"{sid}.json"):
+                with LOCK:
+                    SESSIONS.pop(sid, None)
+                try:
+                    p = (SESSION_DIR / f"{sid}.json").resolve()
+                    p.relative_to(SESSION_DIR.resolve())
+                except Exception:
+                    return bad(handler, "Invalid session_id", 400)
+                sidecar_deleted = False
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
+                sidecar_deleted = not p.exists()
+                if sidecar_deleted:
+                    draft_path(p).unlink(missing_ok=True)
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -19052,6 +19069,7 @@ def _handle_session_export(handler, parsed):
     # ``redact_session_data`` path so export context_messages uses the same
     # alias-stripping boundary as the visible transcript.
     snapshot = dict(s.__dict__)
+    snapshot["composer_draft"] = s.composer_draft
     if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
         state_messages = get_state_db_session_messages(
             sid, profile=getattr(s, "profile", None), include_row_identity=True,

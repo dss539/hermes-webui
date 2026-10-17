@@ -107,11 +107,14 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 State directory (runtime data, separate from source):
 
     ~/.hermes/webui/
-    sessions/          One JSON file per session: {session_id}.json
+    sessions/          Session transcripts: {session_id}.json; composer drafts: {session_id}.draft
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)
     projects.json      Session project groups (name, color, id)
+
+Draft storage, legacy fallback, locking and lifecycle behavior are documented in
+[Composer draft persistence](docs/architecture/composer-drafts.md).
 
 Log file:
 

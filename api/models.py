@@ -3,6 +3,7 @@ import collections
 import contextvars
 import copy
 import datetime
+import functools
 import hashlib
 import inspect
 import json
@@ -1658,6 +1659,22 @@ class Session:
             except (TypeError, ValueError):
                 parsed_message_count = None
         self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
+
+    @property
+    def composer_draft(self):
+        from api.composer_drafts import read_draft
+        # The small record wins even when empty: clearing must not resurrect a
+        # legacy draft embedded in an older transcript snapshot. Resolve it on
+        # read so cached, metadata-only and independently loaded objects agree.
+        if not is_safe_session_id(self.session_id):
+            return self.__dict__.get('composer_draft', {})
+        return read_draft(self.path, self.__dict__.get('composer_draft', {}))
+
+    @composer_draft.setter
+    def composer_draft(self, value):
+        # Retain the legacy field for constructors, snapshots and imports. Only
+        # the draft endpoint writes the authoritative standalone record.
+        self.__dict__['composer_draft'] = value if isinstance(value, dict) else {}
 
     @property
     def path(self):
@@ -6448,6 +6465,45 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             active.discard(session_id)
             _FULL_SESSION_RESOLVE_LOCAL.active = active
             _finish_full_session_resolve(session_id, event)
+
+
+@functools.lru_cache(maxsize=128)
+def _draft_owner_metadata(path, signature):
+    # Keep only the fields a draft request needs, never a transcript. The stat
+    # signature invalidates this bounded cache when another writer replaces or
+    # edits the session file. Legacy parsing is paid once per file revision.
+    fields = ('session_id', 'title', 'workspace', 'profile', 'composer_draft',
+              'source_tag', 'raw_source', 'session_source')
+    prefix = _read_metadata_json_prefix(path)
+    data = json.loads(prefix) if prefix else None
+    if not isinstance(data, dict) or not all(key in data for key in fields):
+        # Legacy provenance can occur after messages. Do not infer writable
+        # ownership from an incomplete prefix, even if it carried the draft.
+        data = json.loads(path.read_text(encoding='utf-8'))
+    return {key: data[key] for key in fields if key in data}
+
+
+def get_session_for_draft(sid):
+    """Read draft ownership without transcript recovery or writer side effects."""
+    if not is_safe_session_id(sid):
+        raise KeyError(sid)
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if cached is not None and cached.session_id == sid:
+            SESSIONS.move_to_end(sid)
+            return cached
+    path = SESSION_DIR / f'{sid}.json'
+    try:
+        stat = path.stat()
+        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        data = _draft_owner_metadata(path, signature)
+    except FileNotFoundError:
+        raise KeyError(sid) from None
+    if data.get('session_id') != sid:
+        raise KeyError(sid)
+    session = Session(**data)
+    session._loaded_metadata_only = True
+    return session
 
 
 def get_session(sid, metadata_only=False):
