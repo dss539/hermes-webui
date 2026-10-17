@@ -92,7 +92,8 @@ def test_sessions_api_always_retries_transient_upstream_statuses_and_boot_keeps_
     assert "sessionRequestOpts.retryTimeouts=true;" in refresh
     assert refresh.index("sessionRequestOpts.retryTimeouts=true;") > boot_gate
 
-    assert "const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);" in helper
+    assert "const response=await api('/api/sessions' + sessionListQS,{" in helper
+    assert "...sessionRequestOpts,responseMeta:true,cache:'no-store'" in helper
     assert "api('/api/sessions' + sessionListQS,{timeoutToast:false})" not in helper
     assert "retryTimeouts" in workspace_src
     assert "retryStatuses" in workspace_src

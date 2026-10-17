@@ -28,6 +28,7 @@ async function api(path,opts={}){
       delete fetchOpts.retryStatuses;
       delete fetchOpts.retryDelayMs;
       delete fetchOpts.statusOnly;
+      delete fetchOpts.responseMeta;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -42,6 +43,10 @@ async function api(path,opts={}){
       }
       const requestPromise=(async()=>{
         const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...fetchOpts});
+        const serverTime=opts.responseMeta===true ? (Number(res.headers.get('x-sidebar-server-time'))||null) : null;
+        if(opts.responseMeta===true && res.status===304){
+          return {unchanged:true,etag:res.headers.get('etag'),data:null,serverTime};
+        }
         if(!res.ok){
           // 401 means the auth session expired. Redirect to login so the user can
           // re-authenticate. This is especially important for iOS PWA (standalone mode)
@@ -92,7 +97,8 @@ async function api(path,opts={}){
           return {status:res.status};
         }
         const ct=res.headers.get('content-type')||'';
-        return ct.includes('application/json')?await res.json():await res.text();
+        const data=ct.includes('application/json')?await res.json():await res.text();
+        return opts.responseMeta===true ? {data,etag:res.headers.get('etag'),unchanged:false,serverTime} : data;
       })();
       return useTimeout?await Promise.race([
         requestPromise,
