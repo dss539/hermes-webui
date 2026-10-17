@@ -1,13 +1,33 @@
 """Small atomic composer records, independent of transcript persistence."""
+from collections import OrderedDict
 import json
 import logging
 import os
 import threading
+import time
 import weakref
 from pathlib import Path
 
 _LOCKS = weakref.WeakValueDictionary()
 _LOCKS_LOCK = threading.Lock()
+_WARNING_TIMES = OrderedDict()
+_WARNING_LOCK = threading.Lock()
+
+
+def _warn_draft_error(path, message, error):
+    # Keep traceback cost/noise bounded on polling reads of an unquarantinable
+    # record. Store signatures, not exceptions/tracebacks, and cap the cache.
+    key = (str(path), message, type(error), str(error))
+    now = time.monotonic()
+    with _WARNING_LOCK:
+        previous = _WARNING_TIMES.get(key)
+        if previous is not None and now - previous < 60:
+            return
+        _WARNING_TIMES[key] = now
+        _WARNING_TIMES.move_to_end(key)
+        if len(_WARNING_TIMES) > 256:
+            _WARNING_TIMES.popitem(last=False)
+    logging.getLogger(__name__).warning(message, path, exc_info=True)
 
 
 def draft_lock(session_path: Path):
@@ -44,8 +64,8 @@ def read_draft(session_path: Path, fallback=None) -> dict:
         if corrupt.exists():
             return {}
         return fallback if isinstance(fallback, dict) else {}
-    except (OSError, ValueError, UnicodeError):
-        logging.getLogger(__name__).warning('Unreadable composer draft %s; treating as empty', path, exc_info=True)
+    except (OSError, ValueError, UnicodeError) as exc:
+        _warn_draft_error(path, 'Unreadable composer draft %s; treating as empty', exc)
     # Property reads can occur while a cache/index lock is held. Never wait for
     # a draft writer (which may need that lock) just to quarantine a bad record.
     lock = draft_lock(session_path)
@@ -60,8 +80,8 @@ def read_draft(session_path: Path, fallback=None) -> dict:
         except (OSError, ValueError, UnicodeError):
             try:
                 path.replace(corrupt)
-            except OSError:
-                logging.getLogger(__name__).warning('Failed to quarantine composer draft %s', path, exc_info=True)
+            except OSError as exc:
+                _warn_draft_error(path, 'Failed to quarantine composer draft %s', exc)
             return {}
     finally:
         lock.release()

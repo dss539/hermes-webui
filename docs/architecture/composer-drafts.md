@@ -24,8 +24,10 @@ A changed draft write flushes and fsyncs a uniquely named temporary file, then
 atomically replaces the standalone record. A failed write leaves the previous
 record authoritative and removes the temporary file. Corrupt, non-object or
 unreadable standalone records are logged and treated as authoritative empty
-values, so draft damage cannot block transcript save, compact or export. A
-best-effort rename retains the bad bytes as `<session_id>.draft.corrupt`; this
+values, so draft damage cannot block transcript save, compact or export.
+Repeated read/quarantine warnings are limited per path and cause to once per
+minute, with a bounded 256-signature cache that retains no exception objects.
+A best-effort rename retains the bad bytes as `<session_id>.draft.corrupt`; this
 quarantine also marks an empty draft on later reads, preventing legacy draft
 resurrection. Quarantine never waits for another draft lock holder and retries
 validation under its acquired lock before renaming, so it cannot move a healthy
@@ -63,7 +65,9 @@ Lifecycle behavior:
   quarantined draft under the draft lock. Cleanup retains the existing policy
   of removing empty transcripts even when they have a nonempty draft. The
   transcript-lock-before-draft-lock order agrees with single-session deletion;
-  draft unlink failures are logged without skipping later index/journal cleanup.
+  bulk cleanup waits at most 100 ms for each transcript writer lock, leaves busy
+  sessions untouched, and reports their count as `skipped` alongside `cleaned`.
+  Draft unlink failures are logged without skipping later index/journal cleanup.
   Ephemeral, hidden-background and admission-rollback removals use the same
   file-removal helper.
 - Duplicate reads the current draft and copies it independently into the new

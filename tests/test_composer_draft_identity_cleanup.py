@@ -114,6 +114,60 @@ def test_cleanup_removes_draft_with_empty_session(store, monkeypatch):
     assert not quarantine.exists()
 
 
+@pytest.mark.parametrize('zero_only', [False, True])
+def test_cleanup_skips_busy_session_and_removes_other_session(store, monkeypatch, zero_only):
+    busy = seed(store, messages=False)
+    busy.title = 'Untitled'
+    busy.save()
+    drafts.write_draft(busy.path, {'text': 'busy private draft'})
+    before = busy.path.read_bytes(), drafts.draft_path(busy.path).read_bytes()
+    other = models.Session(session_id='cleanupavailable', title='Untitled', workspace=str(store.parent))
+    other.save()
+    models.SESSIONS[other.session_id] = other
+    drafts.write_draft(other.path, {'text': 'other draft'})
+    held, release, finished = threading.Event(), threading.Event(), threading.Event()
+    result, errors, loaded = {}, [], []
+    real_load = models.Session.load
+
+    def observe_load(sid, *a, **kw):
+        loaded.append(sid)
+        return real_load(sid, *a, **kw)
+
+    def hold():
+        with routes._get_session_agent_lock(busy.session_id):
+            held.set()
+            release.wait(5)
+
+    def clean():
+        try:
+            routes._handle_sessions_cleanup(Handler(), {}, zero_only=zero_only)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(models.Session, 'load', observe_load)
+    monkeypatch.setattr(routes, 'j', lambda h, payload, **kw: result.update(payload))
+    holder = threading.Thread(target=hold)
+    remover = threading.Thread(target=clean)
+    holder.start()
+    assert held.wait(5)
+    remover.start()
+    try:
+        assert finished.wait(1), 'cleanup waited for the busy streaming session'
+        assert not errors
+        assert result == {'ok': True, 'cleaned': 1, 'skipped': 1}
+        assert busy.session_id not in loaded, 'cleanup read a session without its writer lock'
+        assert (busy.path.read_bytes(), drafts.draft_path(busy.path).read_bytes()) == before
+        assert models.SESSIONS[busy.session_id] is busy
+        assert not other.path.exists() and not drafts.draft_path(other.path).exists()
+    finally:
+        release.set()
+        holder.join(5)
+        remover.join(5)
+    assert not holder.is_alive() and not remover.is_alive()
+
+
 def test_cleanup_waits_for_draft_publication(store, monkeypatch):
     s = seed(store, messages=False)
     entered, resume, attempted = threading.Event(), threading.Event(), threading.Event()
@@ -207,6 +261,8 @@ def test_cleanup_before_resolved_draft_save_leaves_no_orphan(store, monkeypatch)
 def test_delete_draft_unlink_failure_does_not_skip_other_cleanup(store, monkeypatch):
     s = seed(store)
     post(monkeypatch, s.session_id, text='draft')
+    backup = s.path.with_suffix('.json.bak')
+    backup.write_bytes(s.path.read_bytes())
     called = []
     real_unlink = Path.unlink
 
@@ -226,6 +282,7 @@ def test_delete_draft_unlink_failure_does_not_skip_other_cleanup(store, monkeypa
     routes.handle_post(Handler(), urlparse('/api/session/delete'))
     assert 'tombstone' in called and 'index' in called
     assert not s.path.exists()
+    assert not backup.exists()
 
 
 @pytest.mark.parametrize('reload', [False, True])

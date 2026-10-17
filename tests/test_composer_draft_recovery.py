@@ -71,6 +71,55 @@ def test_unreadable_draft_and_failed_quarantine_are_contained(store, monkeypatch
     assert get_draft(monkeypatch, s.session_id)['payload']['draft'] == {}
 
 
+def test_failed_quarantine_warnings_are_rate_limited_by_path_and_cause(store, monkeypatch, caplog):
+    from pathlib import Path
+    from types import SimpleNamespace
+    import logging
+
+    clock = [0.0]
+    monkeypatch.setattr(drafts, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    s = seed(store, draft={'text': 'must not return'})
+    path = drafts.draft_path(s.path)
+    path.write_text('invalid')
+    real_replace = Path.replace
+    cause = ['quarantine denied']
+
+    def denied_replace(target, *a, **kw):
+        if target.suffix == '.draft':
+            raise PermissionError(cause[0])
+        return real_replace(target, *a, **kw)
+
+    monkeypatch.setattr(Path, 'replace', denied_replace)
+    caplog.set_level(logging.WARNING, logger=drafts.__name__)
+    for _ in range(5):
+        assert drafts.read_draft(s.path, {'text': 'obsolete'}) == {}
+    warnings = [r for r in caplog.records if r.name == drafts.__name__]
+    assert len(warnings) == 2  # one read failure and one quarantine failure
+    assert all(r.exc_info for r in warnings)
+
+    # A different cause or path must still surface its first warning.
+    cause[0] = 'new quarantine failure'
+    assert drafts.read_draft(s.path) == {}
+    warnings = [r for r in caplog.records if r.name == drafts.__name__]
+    assert len(warnings) == 3
+    other = store / 'otherdraft.json'
+    drafts.draft_path(other).write_text('invalid')
+    assert drafts.read_draft(other) == {}
+    warnings = [r for r in caplog.records if r.name == drafts.__name__]
+    assert len(warnings) == 5
+
+    clock[0] = 59.0
+    assert drafts.read_draft(s.path) == {}
+    assert len([r for r in caplog.records if r.name == drafts.__name__]) == 5
+    clock[0] = 60.0
+    assert drafts.read_draft(s.path) == {}
+    assert len([r for r in caplog.records if r.name == drafts.__name__]) == 7
+
+    # Suppression must not suppress recovery or resurrect the legacy fallback.
+    drafts.write_draft(s.path, {'text': 'repaired'})
+    assert s.composer_draft == {'text': 'repaired'}
+
+
 def test_corrupt_property_read_does_not_wait_for_draft_lock(store):
     s = seed(store, draft={'text': 'obsolete'})
     path = drafts.draft_path(s.path)

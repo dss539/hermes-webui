@@ -17095,9 +17095,7 @@ def handle_post(handler, parsed) -> bool:
         cli_meta_for_delete = _lookup_cli_session_metadata(sid)
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
-        # A delegated subagent child (#5307) is view-only and owned by the
-        # delegate runner. Deleting it here would call delete_cli_session() and
-        # erase the child's state.db transcript — refuse it.
+        # Subagent transcripts are view-only and delegate-runner-owned (#5307).
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
@@ -17109,8 +17107,7 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
-        # Serialize with recovery, but bound contention so a browser timeout
-        # cannot be followed by a delayed server-side delete.
+        # Bound recovery-lock contention to prevent delayed deletes.
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
@@ -17131,13 +17128,13 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to unlink session file %s", p)
                 sidecar_deleted = not p.exists()
             try:
-                prune_session_from_index(sid)
-            except Exception:
-                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
-            try:
                 p.with_suffix('.json.bak').unlink(missing_ok=True)
             except Exception:
                 logger.debug("Failed to unlink session backup file %s", p.with_suffix('.json.bak'))
+            try:
+                prune_session_from_index(sid)
+            except Exception:
+                logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
             if sidecar_deleted and not is_messaging_session:
                 try:
                     _record_webui_deleted_session_tombstone(sid)
@@ -19083,7 +19080,7 @@ def _handle_session_export(handler, parsed):
     # ``redact_session_data`` path so export context_messages uses the same
     # alias-stripping boundary as the visible transcript.
     snapshot = dict(s.__dict__)
-    snapshot["composer_draft"] = s.composer_draft
+    snapshot["composer_draft"] = getattr(s, "composer_draft", None)
     if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
         state_messages = get_state_db_session_messages(
             sid, profile=getattr(s, "profile", None), include_row_identity=True,
@@ -23723,6 +23720,7 @@ def _handle_memory_read(handler, parsed=None):
 
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
+    skipped = 0
     phase1_removed_ids = set()
 
     # Phase 1: Clean orphan session files (existing behavior).
@@ -23733,18 +23731,27 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             from api.composer_drafts import draft_lock, remove_session_files
             # Match single delete: transcript lock -> draft lock -> cache lock.
             # Reload under both locks so eligibility cannot race a writer.
-            with _get_session_agent_lock(p.stem), draft_lock(p):
-                s = Session.load(p.stem)
-                if zero_only:
-                    should_delete = s and len(s.messages) == 0
-                else:
-                    should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-                if should_delete:
-                    with LOCK:
-                        SESSIONS.pop(p.stem, None)
-                    remove_session_files(p)
-                    cleaned += 1
-                    phase1_removed_ids.add(p.stem)
+            session_lock = _get_session_agent_lock(p.stem)
+            # Bulk maintenance should not wait for an active streaming turn.
+            if not session_lock.acquire(timeout=0.1):
+                skipped += 1
+                logger.debug("Skipping busy session during cleanup: %s", p.stem)
+                continue
+            try:
+                with draft_lock(p):
+                    s = Session.load(p.stem)
+                    if zero_only:
+                        should_delete = s and len(s.messages) == 0
+                    else:
+                        should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                    if should_delete:
+                        with LOCK:
+                            SESSIONS.pop(p.stem, None)
+                        remove_session_files(p)
+                        cleaned += 1
+                        phase1_removed_ids.add(p.stem)
+            finally:
+                session_lock.release()
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
 
@@ -23825,7 +23832,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
 
-    return j(handler, {"ok": True, "cleaned": cleaned})
+    return j(handler, {"ok": True, "cleaned": cleaned, "skipped": skipped})
 
 
 def _handle_btw(handler, body):

@@ -49,6 +49,16 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     session.pending_user_message = "Do the long task."
     session.pending_started_at = 1.0
     session.save()
+    from api.composer_drafts import draft_path, write_draft
+
+    old_path = session_dir / f"{old_sid}.json"
+    new_path = session_dir / f"{new_sid}.json"
+    write_draft(old_path, {"text": "archived draft", "files": ["old-file"]})
+    continuation_draft = {"text": "continuation draft", "files": ["new-file"]}
+    write_draft(new_path, continuation_draft)
+    old_draft_bytes = draft_path(old_path).read_bytes()
+    new_draft_bytes = draft_path(new_path).read_bytes()
+    assert session.composer_draft == {"text": "archived draft", "files": ["old-file"]}
     models.SESSIONS[old_sid] = session
     streaming.SESSIONS[old_sid] = session
     event_queue = queue.Queue()
@@ -154,6 +164,17 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     assert "Context compression exhausted" in new_payload["messages"][-1]["content"]
     assert old_sid not in streaming.SESSIONS
     assert streaming.SESSIONS[new_sid].session_id == new_sid
+    # The real permanent-rotation branch must rebind the property's identity;
+    # temporarily rebinding session_id for snapshot writes must not do so.
+    assert session.composer_draft == continuation_draft
+    assert session.compact()["composer_draft"] == continuation_draft
+    assert draft_path(old_path).read_bytes() == old_draft_bytes
+    assert draft_path(new_path).read_bytes() == new_draft_bytes
+    archived = Session.load(old_sid)
+    continuation = Session.load(new_sid)
+    assert archived is not None and continuation is not None
+    assert archived.composer_draft == {"text": "archived draft", "files": ["old-file"]}
+    assert continuation.composer_draft == continuation_draft
 
 
 def test_compression_exhausted_result_is_terminal_failure_even_after_streamed_text():
