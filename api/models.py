@@ -8818,11 +8818,23 @@ def _copy_cli_sessions(sessions: list) -> list:
     for row in sessions:
         item = memo.get(id(row))
         if item is None:
-            item = {}
+            # Copy the scalar majority in C, then replace only nested values.
+            # Building thousands of dictionaries one Python assignment at a
+            # time adds allocation/collection spikes to changed refreshes.
+            item = row.copy()
             memo[id(row)] = item
             for key, value in row.items():
-                copied_key = key if type(key) is str else copy.deepcopy(key, memo)
-                item[copied_key] = value if type(value) in scalar_types else copy.deepcopy(value, memo)
+                if type(key) is not str:
+                    # Non-JSON keys need deepcopy's original key identity and
+                    # insertion order. Keep the existing general path exactly;
+                    # clearing preserves memoized references to this same item.
+                    item.clear()
+                    for original_key, original_value in row.items():
+                        copied_key = original_key if type(original_key) is str else copy.deepcopy(original_key, memo)
+                        item[copied_key] = original_value if type(original_value) in scalar_types else copy.deepcopy(original_value, memo)
+                    break
+                if type(value) not in scalar_types:
+                    item[key] = copy.deepcopy(value, memo)
         result.append(item)
     return result
 

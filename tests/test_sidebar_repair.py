@@ -287,6 +287,31 @@ def test_missing_source_cannot_certify_an_empty_regeneration_snapshot(tmp_path, 
     assert models.get_state_db_regeneration_tail_snapshot('a', 50) is None
 
 
+def test_scalar_metadata_copy_uses_bulk_dictionary_clone():
+    import inspect
+    assert 'item = row.copy()' in inspect.getsource(models._copy_cli_sessions)
+
+
+def test_bulk_copy_preserves_non_json_keys_shared_values_and_cycles():
+    class Key:
+        pass
+    key = Key()
+    row = {}
+    shared = [row, key]
+    row.update({'before': shared, key: shared, 'cycle': row})
+    rows = [row, row]
+    cloned = models._copy_cli_sessions(rows)
+    assert cloned[0] is cloned[1] and cloned[0] is not row
+    keys = list(cloned[0])
+    assert keys[0] == 'before' and keys[2] == 'cycle'
+    copied_key = keys[1]
+    assert type(copied_key) is Key and copied_key is not key
+    assert cloned[0]['cycle'] is cloned[0]
+    assert cloned[0]['before'] is cloned[0][copied_key]
+    assert cloned[0]['before'][0] is cloned[0]
+    assert cloned[0]['before'][1] is copied_key
+
+
 def test_wal_snapshot_change_refuses_with_real_source_path(tmp_path, monkeypatch):
     # Exercise the existing WAL regression's actual observation, not its absent
     # default HERMES_HOME path (which now correctly refuses on its own).
