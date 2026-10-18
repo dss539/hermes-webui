@@ -64,7 +64,7 @@ def test_metadata_images_do_not_correct_compatibility_counts(tmp_path):
     with sqlite3.connect(tmp_path/'_sidebar.db') as c:
         compatibility = c.execute('SELECT index_row_json FROM rows').fetchone()[0]
         assert json.loads(compatibility)['message_count'] == 99
-    assert next(iter(index._store(tmp_path).metadata.values()))[1]['message_count'] == 2
+    assert next(iter(index._store(tmp_path).metadata.values()))[1][True][1]['message_count'] == 2
 
 
 def test_only_changed_sidecar_is_loaded_and_replacement_detected(tmp_path):

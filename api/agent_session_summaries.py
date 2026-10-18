@@ -37,8 +37,8 @@ class UnsupportedSummary(Exception):
     """Use the legacy reader rather than approximate an unknown SQL schema."""
 
 
-class UnsupportedBoundedOrder(UnsupportedSummary):
-    """Keep a usable unbounded summary, but select bounded rows on the source."""
+class UnsupportedOrder(UnsupportedSummary):
+    """Keep raw facts, but preserve plan-dependent tie order on the source."""
 
 
 class _SummaryConnection(sqlite3.Connection):
@@ -126,6 +126,16 @@ class _Reader:
                 len([row for row in shape if row[5]]) != 1 or
                 not any(row[1] == 'id' and row[2].upper() == 'TEXT' and row[5] == 1 for row in shape)):
             raise UnsupportedSummary('nonstandard sessions schema')
+        # Implicit constraints are not replayed by the disposable table builder.
+        # Validate the actual key, not the sqlite_autoindex name: DESC/collation
+        # are absent from table_info. Unknown UNIQUE/PK indexes use legacy SQL.
+        implicit = [(name, origin) for _, name, _, origin, _ in source.execute('PRAGMA index_list(sessions)')
+                    if origin != 'c']
+        if len(implicit) != 1 or implicit[0][1] != 'pk':
+            raise UnsupportedSummary('unsupported implicit sessions index')
+        key = [row for row in source.execute('PRAGMA index_xinfo(' + _quote(implicit[0][0]) + ')') if row[5]]
+        if len(key) != 1 or key[0][2:6] != ('id', 0, 'BINARY', 1):
+            raise UnsupportedSummary('unsupported sessions primary key')
         self.columns = [name for name in _COLUMNS if name in names]
         self.message_shape = list(source.execute('PRAGMA table_info(messages)'))
         self.message_columns = {row[1] for row in self.message_shape}
@@ -136,7 +146,7 @@ class _Reader:
                 not any(row[1] == 'session_id' and row[2].upper() == 'TEXT' for row in self.message_shape) or
                 not any(row[1] == 'timestamp' and row[2].upper() == 'REAL' for row in self.message_shape) or
                 len([row for row in self.message_shape if row[5]]) != 1 or
-                any(row[3] == 'pk' for row in source.execute('PRAGMA index_list(messages)')) or
+                any(row[3] != 'c' for row in source.execute('PRAGMA index_list(messages)')) or
                 not any(row[1] == 'id' and row[2].upper() == 'INTEGER' and row[5] == 1 for row in self.message_shape)):
             # COUNT(id) and COUNT(*) coincide only for the canonical rowid alias.
             # REAL affinity also prevents equal 1/1.0 MAX ties returning different
@@ -187,14 +197,15 @@ class _Reader:
         self.rows = {}
         self.stats = {}
 
-    def refresh(self, *, bounded=False):
+    def refresh(self, *, ordered=False):
         source = self.source
         source.row_factory = None
         version = source.execute('PRAGMA data_version').fetchone()[0]
-        if self.summary is not None and version == self.version:
-            if bounded and not self.bounded_order_supported:
-                raise UnsupportedBoundedOrder('uncertified bounded tie order')
+        schema = source.execute('PRAGMA schema_version').fetchone()[0]
+        if self.summary is not None and version == self.version and schema == self.schema:
             _COUNTERS['unchanged'] += 1
+            if ordered and not self.tie_free:
+                raise UnsupportedOrder('plan-dependent tied order')
             return
         start = time.perf_counter()
         start_wall = time.time()
@@ -202,17 +213,11 @@ class _Reader:
         try:
             schema = source.execute('PRAGMA schema_version').fetchone()[0]
             if schema != self.schema or self.summary is None:
-                from api.sidebar_bounded_order import supports_bounded_order
-                self.bounded_order_supported = supports_bounded_order(source)
-                # Validate the source shape even on a bounded fallback. Legacy
-                # unsupported sources retain their original close-per-read
-                # contract instead of entering the persistent-reader cache.
+                # Validate the source shape before any order certification.
                 self._initialize()
                 self.schema = schema
                 self.watcher_revision += 1
                 _COUNTERS['bootstraps'] += 1
-            if bounded and not self.bounded_order_supported:
-                raise UnsupportedBoundedOrder('uncertified bounded tie order')
             rows = dict((row[1], row) for row in source.execute(
                 'SELECT rowid,' + ','.join(_quote(c) for c in self.columns) + ' FROM sessions ORDER BY rowid'))
             if len(rows) > 65536:
@@ -247,6 +252,18 @@ class _Reader:
                                           [(sid, *stats[sid]) for sid in live if sid in stats])
             except Exception as exc:
                 raise UnsupportedSummary('disposable summary update failed') from exc
+            # Conservative across every scope and candidate/refill window. The
+            # final SQL key is activity (or started_at without messages). If it
+            # is unique over all eligible rows, the candidate tuple starting
+            # with that key is unique too. SQLite, not Python, defines equality
+            # here (including numeric storage classes and NULL groups).
+            self.tie_free = local.execute('''
+                SELECT 1 FROM sessions s
+                LEFT JOIN _sidebar_message_stats ms ON ms.session_id=s.id
+                WHERE s.source IS NOT NULL
+                GROUP BY COALESCE(ms.last_activity,s.started_at)
+                HAVING COUNT(*)>1 LIMIT 1
+            ''').fetchone() is None
             self.rows = rows
             self.stats = stats
             self.version = version  # Never restamp a pre-commit snapshot as newer.
@@ -263,19 +280,23 @@ class _Reader:
                       'full_fact_rereads': 1, 'ms': _COUNTERS['last_fact_ms']}), flush=True)
         finally:
             source.rollback()
+        if ordered and not self.tie_free:
+            raise UnsupportedOrder('plan-dependent tied order')
 
 
 @contextmanager
-def summary_connection(db_path, *, bounded=False):
+def summary_connection(db_path, *, ordered=False):
     """Serialize source adoption and SQL consumers; never retain a transaction.
 
+    Ordered reads (bounded or not) require tie-free effective activity keys.
+    Unordered lookup/watcher consumers can still use tied raw facts.
     On unsupported schemas/failure callers use their original read-only reader.
     Exceptions from the consumer are not caught/replayed here.
     """
     path = Path(db_path).resolve()
     reader = None
     fallback = None
-    bounded_fallback = False
+    order_fallback = False
     with _LOCK:
         try:
             st = path.stat()
@@ -287,17 +308,18 @@ def summary_connection(db_path, *, bounded=False):
             if reader is None:
                 reader = _Reader(path, identity)
                 _READERS[str(path)] = reader
-            reader.refresh(bounded=bounded)
+            reader.refresh(ordered=ordered)
             _READERS.move_to_end(str(path))
             while len(_READERS) > _MAX_READERS or sum(len(entry.rows) for entry in _READERS.values()) > 65536:
                 _READERS.popitem(last=False)[1].close()
                 _COUNTERS['evictions'] += 1
-        except UnsupportedBoundedOrder:
-            bounded_fallback = True
+        except UnsupportedOrder:
+            order_fallback = True
             _READERS.move_to_end(str(path))
-            while len(_READERS) > _MAX_READERS:
+            while len(_READERS) > _MAX_READERS or sum(len(entry.rows) for entry in _READERS.values()) > 65536:
                 _READERS.popitem(last=False)[1].close()
                 _COUNTERS['evictions'] += 1
+            _COUNTERS['tie_fallbacks'] += 1
             _COUNTERS['legacy_fallbacks'] += 1
         except UnsupportedSummary:
             old = _READERS.pop(str(path))
@@ -317,8 +339,8 @@ def summary_connection(db_path, *, bounded=False):
             # Preserve the original single read-only open/failure contract.
             # In particular do not retry an open failure with another handle.
             raise
-        if bounded_fallback:
-            # Retain the useful unbounded cache and its one read-only source.
+        if order_fallback:
+            # Retain raw facts for unordered consumers and the read-only source.
             reader.source.row_factory = None
             yield reader.source
         elif reader is None:

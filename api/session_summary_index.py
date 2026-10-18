@@ -145,10 +145,19 @@ class _Store:
             self.conn.executemany('''INSERT INTO rows VALUES (?,?)
                 ON CONFLICT(session_id) DO UPDATE SET index_row_json=excluded.index_row_json''',
                 [(sid, encoded) for sid, image, encoded in changed])
-            self.conn.execute('UPDATE meta SET index_signature=?,generation=generation+1,index_order=? WHERE singleton=1',
-                              (json.dumps(signature), json.dumps(order)))
+            order_changed = order != self.order
+            image_changed = bool(changed or deleted or order_changed)
+            # A canonical rewrite with identical images needs only a new source
+            # fence. Real row changes must still invalidate other processes even
+            # when recency order is unchanged.
+            if order_changed:
+                self.conn.execute('UPDATE meta SET index_signature=?,generation=generation+1,index_order=? WHERE singleton=1',
+                                  (json.dumps(signature), json.dumps(order)))
+            else:
+                self.conn.execute('UPDATE meta SET index_signature=?,generation=generation+? WHERE singleton=1',
+                                  (json.dumps(signature), int(image_changed)))
             self.conn.commit()
-            generation = self.generation + 1
+            generation = self.generation + int(image_changed)
             # If installation of the process-local delta fails after commit,
             # the next transaction must reload the committed row map.
             self.generation = -1
@@ -257,23 +266,29 @@ def metadata_compact(path, index_message_count, loader):
     signature = path_revision(path)
     if signature is None:
         return loader()
-    key = (signature, index_message_count)
     try:
         with _LOCK:
             store = _store(path.parent)
             hit = store.metadata.get(path.stem)
-            if hit is not None and hit[0] == key:
-                store.metadata.move_to_end(path.stem)
-                _COUNTERS['metadata_hits'] += 1
-                return copy.deepcopy(hit[1])
+            variant = index_message_count is not None
+            if hit is not None and hit[0] == signature:
+                cached = hit[1].get(variant)
+                if cached is not None and cached[0] == index_message_count:
+                    store.metadata.move_to_end(path.stem)
+                    _COUNTERS['metadata_hits'] += 1
+                    return copy.deepcopy(cached[1])
         row = loader()
         _COUNTERS['metadata_loads'] += 1
         if row is None or path_revision(path) != signature:
             return row
         with _LOCK:
             store = _store(path.parent)
-            # Exactly one generation per stem: replacement and eviction are O(1).
-            store.metadata[path.stem] = (key, copy.deepcopy(row))
+            # Two bounded variants per stem: count-free and latest counted
+            # image. A new file generation replaces both in O(1).
+            hit = store.metadata.get(path.stem)
+            variants = hit[1] if hit is not None and hit[0] == signature else {}
+            variants[variant] = (index_message_count, copy.deepcopy(row))
+            store.metadata[path.stem] = (signature, variants)
             store.metadata.move_to_end(path.stem)
             while len(store.metadata) > 2000:
                 store.metadata.popitem(last=False)

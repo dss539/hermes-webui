@@ -186,11 +186,8 @@ def test_bounded_guard_exact_legacy_source_and_canonical_summary(tmp_path,mutati
             assert json.dumps(actual,sort_keys=True)==json.dumps(expected,sort_keys=True),(mutation,limit,scope)
             comparisons+=1
     counters=summaries.counters()
-    if mutation in ('canonical','analyzed'):
-        assert counters.get('legacy_fallbacks',0)==0
-        assert counters['summary_policy_passes']>0
-    else:
-        assert counters['legacy_fallbacks']==comparisons
-        assert counters.get('source_read_failures',0)==0
-        assert counters.get('full_fact_rereads',0)==0
+    assert counters['legacy_fallbacks']==comparisons
+    assert counters.get('source_read_failures',0)==0
+    assert counters['full_fact_rereads']==1
+    assert counters['tie_fallbacks']==comparisons
     print('bounded_guard',mutation,'comparisons',comparisons,'fallbacks',counters.get('legacy_fallbacks',0))

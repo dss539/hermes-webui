@@ -151,7 +151,7 @@ let _allSessions = [{{
 function _isServerIdleSessionRow(s) {{{helper_body}}}
 function _isSessionLocallyStreaming(s) {{{local_body}}}
 function _isOptimisticFirstTurnSessionRow(s) {{{optimistic_body}}}
-function _mergeOptimisticFirstTurnSessions(fetchedSessions) {{{merge_body}}}
+function _mergeOptimisticFirstTurnSessions(fetchedSessions,detached=false) {{{merge_body}}}
 const merged = _mergeOptimisticFirstTurnSessions([{{
   session_id: 'dogfood-session',
   title: 'Dogfood Docs Routing Review',
@@ -209,7 +209,7 @@ function _isOptimisticFirstTurnSessionRow(s) {{{optimistic_body}}}
 function _shouldKeepLocalOnlyOptimisticSessionRow(local) {{{keep_body}}}
 function _hasOwnedOpenLiveStream(sid) {{{owner_body}}}
 function _dropStaleOptimisticSessionRow(sid) {{{drop_body}}}
-function _mergeOptimisticFirstTurnSessions(fetchedSessions) {{{merge_body}}}
+function _mergeOptimisticFirstTurnSessions(fetchedSessions,detached=false) {{{merge_body}}}
 const merged = _mergeOptimisticFirstTurnSessions([{{
   session_id: 'dogfood-session',
   title: 'Server running row',
