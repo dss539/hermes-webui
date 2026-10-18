@@ -150,11 +150,18 @@ def read_index(path):
         return json.loads(path.read_bytes())
 
 
-def publish_index(path, rows):
-    """Best effort after canonical replace, under existing writer serialization."""
+def publish_index(path, rows, expected_source=None):
+    """Best effort after canonical replace, under existing writer serialization.
+
+    Bind input rows to the temporary file's pre-publication identity/mtime/size.
+    A later external writer must not bless our older rows under its new stamp.
+    """
     try:
         with _LOCK:
-            _store(Path(path).parent).publish(Path(path), rows, path_revision(path))
+            signature = path_revision(path)
+            if signature is None or signature[:3] + signature[4:] != expected_source:
+                return
+            _store(Path(path).parent).publish(Path(path), rows, signature)
     except Exception:
         _COUNTERS['publish_failures'] += 1
         _LOG.debug('WebUI summary maintenance failed; JSON retained', exc_info=True)
@@ -171,7 +178,7 @@ def publish_saved(path, compact, expected_identity):
         compact = _image(compact)
         with _LOCK:
             signature = path_revision(path)
-            if signature is None or signature[:2] != expected_identity:
+            if signature is None or signature[:3] + signature[4:] != expected_identity:
                 return
             store = _store(Path(path).parent)
             with store.conn:

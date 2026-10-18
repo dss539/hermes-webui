@@ -491,9 +491,10 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
+                    index_stat = os.fstat(f.fileno())
                 _safe_replace(_tmp, session_index_file)
                 from api.session_summary_index import publish_index
-                publish_index(session_index_file, entries)
+                publish_index(session_index_file, entries, (index_stat.st_dev, index_stat.st_ino, index_stat.st_mtime_ns, index_stat.st_size))
             except Exception:
                 # Best-effort cleanup of stale tmp on failure
                 try:
@@ -540,9 +541,10 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.write(_payload)
                     f.flush()
                     os.fsync(f.fileno())
+                    index_stat = os.fstat(f.fileno())
                 _safe_replace(_tmp, session_index_file)
                 from api.session_summary_index import publish_index
-                publish_index(session_index_file, existing)
+                publish_index(session_index_file, existing, (index_stat.st_dev, index_stat.st_ino, index_stat.st_mtime_ns, index_stat.st_size))
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
@@ -1954,7 +1956,7 @@ class Session:
                 f.flush()
                 os.fsync(f.fileno())
                 published_stat = os.fstat(f.fileno())
-                published_identity = (published_stat.st_dev, published_stat.st_ino)
+                published_identity = (published_stat.st_dev, published_stat.st_ino, published_stat.st_mtime_ns, published_stat.st_size)
             if skip_index:
                 # Callers that explicitly skip the sidebar projection retain
                 # the existing same-session concurrency contract: their unique
