@@ -339,10 +339,21 @@ def summary_connection(db_path, *, ordered=False):
             # Preserve the original single read-only open/failure contract.
             # In particular do not retry an open failure with another handle.
             raise
+        if order_fallback or reader is None:
+            if os.getenv('HERMES_WEBUI_SIDEBAR_DIAGNOSTICS') == '1':
+                # Existing opt-in diagnostics: numeric process counters only,
+                # never source paths, session identifiers or row contents.
+                print('[sidebar-summary] ' + json.dumps({'event': 'fallback',
+                      'tie_fallbacks': _COUNTERS['tie_fallbacks'],
+                      'legacy_fallbacks': _COUNTERS['legacy_fallbacks']}), flush=True)
         if order_fallback:
-            # Retain raw facts for unordered consumers and the read-only source.
-            reader.source.row_factory = None
-            yield reader.source
+            # Production opens a new read-only handle for each ordered read.
+            # The retained fact reader can have stale planner statistics after
+            # external ANALYZE even though data_version detects the commit.
+            # Keep it for raw facts, but never use it for plan-sensitive ties.
+            with closing(sqlite3.connect(state_db_readonly_uri(path), uri=True,
+                                         timeout=.05, check_same_thread=False)) as conn:
+                yield conn
         elif reader is None:
             assert fallback is not None
             fallback.row_factory = None
