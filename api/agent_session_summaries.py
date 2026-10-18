@@ -94,8 +94,9 @@ class _Reader:
         self.path = path
         self.identity = identity
         self.source = sqlite3.connect(
-            state_db_readonly_uri(path), uri=True, timeout=.05,
-            check_same_thread=False,
+            # Production's default 5 s busy timeout: a briefly locked state.db
+            # must delay this read, not fail it.
+            state_db_readonly_uri(path), uri=True, check_same_thread=False,
         )
         self.summary = None
         self.version = None
@@ -351,8 +352,9 @@ def summary_connection(db_path, *, ordered=False):
             # The retained fact reader can have stale planner statistics after
             # external ANALYZE even though data_version detects the commit.
             # Keep it for raw facts, but never use it for plan-sensitive ties.
-            with closing(sqlite3.connect(state_db_readonly_uri(path), uri=True,
-                                         timeout=.05, check_same_thread=False)) as conn:
+            # Open exactly as production does (default 5 s busy timeout), so
+            # a briefly locked state.db is waited for rather than failed.
+            with closing(sqlite3.connect(state_db_readonly_uri(path), uri=True)) as conn:
                 yield conn
         elif reader is None:
             assert fallback is not None

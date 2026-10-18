@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 
 import pytest
 from api import agent_sessions as agent, agent_session_summaries as summaries
@@ -111,7 +112,10 @@ def test_unchanged_schema_read_precedes_order_certification(tmp_path,monkeypatch
     real_connect=sqlite3.connect
     def traced(*args,**kwargs):
         conn=real_connect(*args,**kwargs)
-        if kwargs.get('check_same_thread') is False:
+        # The per-read ordered fallback opens exactly like production
+        # (read-only URI, default arguments), so identify it by its caller,
+        # not its kwargs; the production oracle's own handles stay untraced.
+        if sys._getframe(1).f_globals.get('__name__') == summaries.__name__:
             conn.set_trace_callback(trace.append)
         return conn
     monkeypatch.setattr(sqlite3,'connect',traced)
