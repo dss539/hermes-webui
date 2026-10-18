@@ -138,8 +138,18 @@ class _Reader:
             # REAL affinity also prevents equal 1/1.0 MAX ties returning different
             # storage classes in scalar-indexed versus grouped consumer queries.
             raise UnsupportedSummary('legacy messages schema')
-        local = sqlite3.connect(':memory:', factory=_SummaryConnection, check_same_thread=False)
+        # Finish source reads outside the disposable-build exception boundary.
+        indexes = []
+        for name, sql in source.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='sessions' AND sql IS NOT NULL"):
+            index_columns = [row[2] for row in source.execute('PRAGMA index_info(' + _quote(name) + ')')]
+            if index_columns and all(col in self.columns for col in index_columns):
+                indexes.append(sql)
+        messages_index_present = self.message_shape and any(
+            row[1] == 'idx_messages_session' for row in source.execute('PRAGMA index_list(messages)'))
+        local = None
         try:
+            local = sqlite3.connect(':memory:', factory=_SummaryConnection, check_same_thread=False)
             definitions = []
             for row in shape:
                 if row[1] in self.columns:
@@ -147,26 +157,26 @@ class _Reader:
                     # column's affinity. Preserve id lookup and source rowid order.
                     definitions.append(_quote(row[1]) + ' ' + row[2] + (' PRIMARY KEY' if row[1] == 'id' else ''))
             local.execute('CREATE TABLE sessions (' + ','.join(definitions) + ')')
-            for name, sql in source.execute(
-                    "SELECT name,sql FROM sqlite_master WHERE type='index' AND tbl_name='sessions' AND sql IS NOT NULL"):
-                index_columns = [row[2] for row in source.execute('PRAGMA index_info(' + _quote(name) + ')')]
-                if index_columns and all(col in self.columns for col in index_columns):
-                    local.execute(sql)
+            # index_info omits predicate dependencies; all local DDL failures
+            # below are unsupported, never evidence of unreadable Agent data.
+            for sql in indexes:
+                local.execute(sql)
             local.execute('CREATE TABLE _sidebar_message_stats (session_id TEXT PRIMARY KEY, actual_message_count, actual_user_message_count, last_activity)')
             if self.message_shape:
                 # Shape only, never fabricated message rows. Deny reads below so
                 # a missed integration cannot silently consume an empty history.
                 local.execute('CREATE TABLE messages (' + ','.join(_quote(row[1]) for row in self.message_shape) + ')')
-                if any(row[1] == 'idx_messages_session' for row in source.execute('PRAGMA index_list(messages)')):
+                if messages_index_present:
                     local.execute('CREATE INDEX idx_messages_session ON messages(session_id,timestamp)')
             local.set_authorizer(lambda action, table, column, db, trigger:
                                  sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == 'messages'
                                  else sqlite3.SQLITE_OK)
             local.sidebar_source = source
             local.sidebar_reader = self
-        except Exception:
-            local.close()
-            raise
+        except Exception as exc:
+            if local is not None:
+                local.close()
+            raise UnsupportedSummary('disposable summary construction failed') from exc
         if self.summary is not None:
             self.summary.close()
         self.summary = local
@@ -212,15 +222,18 @@ class _Reader:
             if any(watched(self.rows.get(sid)) or watched(rows.get(sid)) for sid in changed):
                 self.watcher_revision += 1
             local = self.summary
-            with local:
-                local.executemany('DELETE FROM sessions WHERE id=?', [(sid,) for sid in changed])
-                local.executemany('DELETE FROM _sidebar_message_stats WHERE session_id=?', [(sid,) for sid in changed])
-                live = [sid for sid in changed if sid in rows]
-                if live:
-                    local.executemany('INSERT INTO sessions(rowid,' + ','.join(_quote(c) for c in self.columns) + ') VALUES (' + ','.join('?' for _ in range(len(self.columns) + 1)) + ')',
-                                      [rows[sid] for sid in live])
-                    local.executemany('INSERT INTO _sidebar_message_stats VALUES (?,?,?,?)',
-                                      [(sid, *stats[sid]) for sid in live if sid in stats])
+            try:
+                with local:
+                    local.executemany('DELETE FROM sessions WHERE id=?', [(sid,) for sid in changed])
+                    local.executemany('DELETE FROM _sidebar_message_stats WHERE session_id=?', [(sid,) for sid in changed])
+                    live = [sid for sid in changed if sid in rows]
+                    if live:
+                        local.executemany('INSERT INTO sessions(rowid,' + ','.join(_quote(c) for c in self.columns) + ') VALUES (' + ','.join('?' for _ in range(len(self.columns) + 1)) + ')',
+                                          [rows[sid] for sid in live])
+                        local.executemany('INSERT INTO _sidebar_message_stats VALUES (?,?,?,?)',
+                                          [(sid, *stats[sid]) for sid in live if sid in stats])
+            except Exception as exc:
+                raise UnsupportedSummary('disposable summary update failed') from exc
             self.rows = rows
             self.stats = stats
             self.version = version  # Never restamp a pre-commit snapshot as newer.

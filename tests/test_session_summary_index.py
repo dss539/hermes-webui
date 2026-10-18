@@ -25,14 +25,14 @@ def test_index_changed_rows_external_edit_restart_and_delete(tmp_path):
     assert index.read_index(path) == rows
     assert index.counters()['full_index_parses'] == initial['full_index_parses']
     with sqlite3.connect(tmp_path/'_sidebar.db') as c:
-        before = dict(c.execute('SELECT session_id,updated_seq FROM rows'))
+        before = dict(c.execute('SELECT session_id,index_row_json FROM rows'))
     rows[1]['message_count'] = 4
     path.write_text(json.dumps(rows))
     assert index.read_index(path) == rows
     with sqlite3.connect(tmp_path/'_sidebar.db') as c:
-        after = dict(c.execute('SELECT session_id,updated_seq FROM rows'))
+        after = dict(c.execute('SELECT session_id,index_row_json FROM rows'))
     assert before['a'] == after['a']
-    assert before['b'] < after['b']
+    assert before['b'] != after['b']
     index.clear()
     assert index.read_index(path) == rows
     assert index.counters()['index_disk_hits'] == 1
@@ -40,7 +40,7 @@ def test_index_changed_rows_external_edit_restart_and_delete(tmp_path):
     path.write_text(json.dumps(rows))
     assert index.read_index(path) == rows
     with sqlite3.connect(tmp_path/'_sidebar.db') as c:
-        assert c.execute("SELECT deleted,index_row_json FROM rows WHERE session_id='b'").fetchone() == (1, None)
+        assert c.execute("SELECT index_row_json FROM rows WHERE session_id='b'").fetchone() is None
 
 
 def test_metadata_images_do_not_correct_compatibility_counts(tmp_path):
@@ -62,9 +62,9 @@ def test_metadata_images_do_not_correct_compatibility_counts(tmp_path):
     assert index.read_index(index_path)[0]['message_count'] == 99
     assert index.metadata_compact(path, 99, load)['message_count'] == 2
     with sqlite3.connect(tmp_path/'_sidebar.db') as c:
-        sidecar, compatibility = c.execute('SELECT sidecar_row_json,index_row_json FROM rows').fetchone()
-        assert json.loads(sidecar)['message_count'] == 2
+        compatibility = c.execute('SELECT index_row_json FROM rows').fetchone()[0]
         assert json.loads(compatibility)['message_count'] == 99
+    assert next(iter(index._store(tmp_path).metadata.values()))['message_count'] == 2
 
 
 def test_only_changed_sidecar_is_loaded_and_replacement_detected(tmp_path):

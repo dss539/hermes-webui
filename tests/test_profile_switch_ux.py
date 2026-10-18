@@ -242,11 +242,15 @@ class TestProfileSessionListFlip:
 
     def test_profile_refresh_captures_before_render_and_plays_after_rows_exist(self):
         capture = self.JS.index("const flipBefore=animateRefresh?_captureSessionReflowPositions():null;")
-        clear = self.JS.index("list.innerHTML='';", capture)
-        row_render = self.JS.index("body.appendChild(_renderOneSession", clear)
-        play = self.JS.index("_playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);", row_render)
-
-        assert capture < clear < row_render < play
+        fragment = self.JS.index("const content=document.createDocumentFragment();", capture)
+        row_render = self.JS.index("body.appendChild(_renderOneSession", fragment)
+        mount = self.JS.index("list.replaceChildren(content);", row_render)
+        play = self.JS.index("_playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);", mount)
+        assert capture < fragment < row_render < mount < play
+        # Async slots must finish before the same FLIP callback runs.
+        complete = self.JS.index('else{\n        job.cancel();', mount)
+        async_play = self.JS.index('_playSessionRowsReflowFromPositions(', complete)
+        assert complete < async_play
 
     def test_profile_refresh_drops_queued_reflow_before_playing_flip(self):
         start = self.JS.index("// Refresh FLIP and queued archive/delete reflow both drive")

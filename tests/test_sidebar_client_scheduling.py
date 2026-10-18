@@ -106,7 +106,7 @@ _refreshSidebarTimeLabels();assert.equal(renders,2,'a new day must regroup rows'
 ''')
 
 
-def test_304_does_not_render_again_but_waits_for_the_applied_chunked_paint():
+def test_304_reconciles_and_waits_for_the_applied_chunked_paint():
     node('''
 const assert=require('node:assert/strict');
 const $=()=>({value:''}),_sessionListQueryString=()=>'',_restoreSidebarBootCache=()=>{};
@@ -116,13 +116,13 @@ const _allProjects=[];
 const _loadSidebarSessionListPayload=async()=>({sessData:{},projData:{projects:[]},unchanged:true});
 let release,done=false,applies=0;
 let _sessionListPaintJob={completion:new Promise(r=>release=r)};
-const _applySessionListPayload=()=>applies++;
+const _applySessionListPayload=()=>{applies++;return _sessionListPaintJob.completion;};
 const _showSessionListLoadError=e=>{throw e};
 ''' + section('async function _runRenderSessionListRefresh(', 'let _sidebarSessionValidator') + '''
 (async()=>{
  const result=_runRenderSessionListRefresh({},1).then(()=>done=true);
  await new Promise(r=>setTimeout(r,20));
- assert.equal(applies,0);assert.equal(done,false,'304 finished before its applied paint');
- release();await result;assert.equal(done,true);assert.equal(applies,0);
+ assert.equal(applies,1);assert.equal(done,false,'304 finished before its applied paint');
+ release();await result;assert.equal(done,true);assert.equal(applies,1);
 })().catch(e=>{console.error(e);process.exitCode=1});
 ''')

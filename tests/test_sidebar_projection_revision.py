@@ -13,8 +13,9 @@ from api import agent_sessions, models, routes, route_session_list_cache as cach
 def test_revision_detects_in_place_update_delete_and_replacement(tmp_path, monkeypatch):
     # Simulate colliding stat/MAX(rowid) probes; only a persistent commit
     # revision can observe UPDATE/DELETE in this case.
+    # The fingerprint IS now the persistent revision; only force filesystem
+    # collisions, not a second stubbed authority that no longer exists.
     monkeypatch.setattr(models, '_path_stat_cache_key', lambda p: ('same',))
-    monkeypatch.setattr(models, '_sqlite_content_fingerprint', lambda p: ('same',))
     sqlite_revision = models._sqlite_file_stat_cache_key
     db = tmp_path / 'state.db'
     with sqlite3.connect(db) as c:

@@ -29,8 +29,19 @@ def sidecar_revision(session_dir):
     """Detect in-place edits as well as additions/removals, without JSON reads."""
     try:
         with os.scandir(session_dir) as entries:
+            def revision(entry):
+                try:
+                    # DirEntry avoids Path allocation and a second path lookup.
+                    # Follow symlinks, as path_revision historically did: edits
+                    # to a canonical symlink target must still invalidate.
+                    st = entry.stat()
+                    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+                except FileNotFoundError:
+                    return None
+                except OSError:
+                    return ('unavailable', time.monotonic_ns())
             return tuple(sorted(
-                (e.name, path_revision(e.path))
+                (e.name, revision(e))
                 for e in entries if e.name.endswith('.json')
             ))
     except FileNotFoundError:

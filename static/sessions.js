@@ -5360,6 +5360,7 @@ function _focusSessionActionMenuRestoreTarget(target){
 }
 
 function closeSessionActionMenu({restoreFocus=false}={}){
+  const hadMenu=Boolean(_sessionActionMenu);
   const focusTarget=restoreFocus?_sessionActionAnchor:null;
   const fallbackFocusTarget=restoreFocus?_sessionActionPreviousFocus:null;
   if(_sessionActionMenu){
@@ -5379,6 +5380,7 @@ function closeSessionActionMenu({restoreFocus=false}={}){
   _sessionActionSessionId = null;
   _sessionActionPreviousFocus = null;
   if(!_focusSessionActionMenuRestoreTarget(focusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
+  if(hadMenu && typeof _sidebarPendingPaint!=='undefined' && _sidebarPendingPaint) _resumePendingSidebarPaint();
 }
 
 function _sessionActionMenuShouldIgnoreScrollTarget(target){
@@ -5582,7 +5584,7 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
       const releaseRename=()=>{
         _renamingSid=null;
         if(inp.isConnected) inp.replaceWith(displayEl);
-        setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+        setTimeout(()=>{ if(_renamingSid===null){renderSessionListFromCache();_resumePendingSidebarPaint();} },50);
       };
       if(!save){
         applyTitle(oldTitle,false);
@@ -6298,9 +6300,9 @@ function _schedulePendingSessionListApply(){
     if(payload.gen!==_renderSessionListGen) return;
     // Profile switch may have bumped unread gen after the list gen check
     // window; still drop completion-marking for the stale pre-switch payload.
-    _applySessionListPayload(payload.sessData,payload.projData,{
+    Promise.resolve().then(()=>_applySessionListPayload(payload.sessData,payload.projData,{
       unreadGen:payload.unreadGen,
-    });
+    })).catch(error=>console.warn('Deferred sidebar apply failed',error));
   }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
 }
 
@@ -6352,6 +6354,29 @@ function _syncSessionAttentionSoundState(sessions){
 // advance each poll so its signature changes and it still renders. Serialization
 // failure returns null → never skip (fail-open). (#5455 WS2.4)
 let _lastSessionListRenderSig = null;
+let _sidebarPendingPaint = null;
+let _sidebarPaintedValidator = null;
+
+function _flushPendingSidebarPaint(){
+  if(!_sidebarPendingPaint || _renamingSid || _sessionActionMenu || _sessionListSkeletonActive) return;
+  const pending=_sidebarPendingPaint;
+  const record=completed=>{
+    if(completed===false || _sidebarPendingPaint!==pending || _allSessions!==pending.sessions) return;
+    _lastSessionListRenderSig=pending.signature;
+    _sidebarPendingPaint=null;
+    _recordSidebarPaint(pending.sessData);
+  };
+  const paint=renderSessionListFromCache();
+  if(paint && typeof paint.then==='function') return paint.then(record);
+  record(true);
+  return paint;
+}
+
+function _resumePendingSidebarPaint(){
+  // Menu close/rename release can be inside an event that opens another menu.
+  // Re-check blockers after that event, and observe deferred paint failures.
+  Promise.resolve().then(_flushPendingSidebarPaint).catch(error=>console.warn('Sidebar paint failed',error));
+}
 function _sessionListRenderSignature(){
   try{
     const search=($('sessionSearch')&&$('sessionSearch').value)||'';
@@ -6375,6 +6400,7 @@ function _applySessionListPayload(sessData, projData, opts){
   // active profile so the "Show N from other profiles" toggle can render
   // without a second round-trip. Stashed on the module for renderSessionListFromCache.
   const applyOpts = (opts && typeof opts === 'object') ? opts : {};
+  const previousSessions=_allSessions;
   _otherProfileCount = sessData.other_profile_count || 0;
   _archivedWebuiCount = Number(sessData.archived_webui_count ?? sessData.archived_count ?? 0);
   _archivedCliCount = Number(sessData.archived_cli_count ?? 0);
@@ -6484,20 +6510,26 @@ function _applySessionListPayload(sessData, projData, opts){
   _recordSidebarProjection(sessData);
   const _mustForceRender = _hadSessionListSkeleton || _hadSessionListLoadError;
   const _renderSig = _sessionListRenderSignature();
+  if(_canRenderNow && typeof _sessionListPaintJob!=='undefined' && _sessionListPaintJob
+    && _sidebarPendingPaint && _sidebarPendingPaint.sessions===previousSessions
+    && _renderSig && _renderSig===_sidebarPendingPaint.signature){
+    // Reconcile a 304 without cancelling an identical in-progress paint.
+    _allSessions=previousSessions;
+    _sidebarPendingPaint.sessData=sessData;
+    return _sessionListPaintJob.completion;
+  }
   if(_canRenderNow && !_mustForceRender && !_sessionListRefreshAnimationPending && _renderSig && _renderSig===_lastSessionListRenderSig){
     // Preserve the per-refresh INFLIGHT cleanup that renderSessionListFromCache
     // would otherwise perform, then skip only the DOM rebuild.
     if(typeof _purgeStaleInflightEntries==='function') _purgeStaleInflightEntries();
     if(typeof _sessionListPaintJob!=='undefined' && _sessionListPaintJob) return _sessionListPaintJob.completion;
+    _sidebarPendingPaint=null;
+    _recordSidebarPaint(sessData);
     return;
   }
-  const paintedSessions=_allSessions;
-  const paint=renderSessionListFromCache();  // no-ops if rename is in progress
-  if(paint && typeof paint.then==='function') return paint.then(completed=>{
-    if(completed && _canRenderNow && _allSessions===paintedSessions) _lastSessionListRenderSig=_renderSig;
-  });
-  if(_canRenderNow) _lastSessionListRenderSig=_renderSig;
-  return paint;
+  _sidebarPendingPaint={sessData,signature:_renderSig,sessions:_allSessions};
+  if(applyOpts.deferPaint) return;
+  return _flushPendingSidebarPaint();
 }
 
 function _mergeRenderSessionListOptions(prev, next){
@@ -6631,14 +6663,12 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // renderSessionList(), so that render's payload is the first allowed to paint.
     if (_profileSwitchListEmbargo) return;
     if(Number.isFinite(serverTime) && serverTime>0) _serverTimeDelta=Date.now()-serverTime*1000;
-    if(unchanged && !_sessionListLoadError && !_sessionListSkeletonActive
-      && JSON.stringify(projData.projects||[])===JSON.stringify(_allProjects||[])){
-      if(typeof _sessionListPaintJob!=='undefined' && _sessionListPaintJob) await _sessionListPaintJob.completion;
-      return;
-    }
+    // A 304 validates server facts, not the locally reconciled model or DOM.
+    // Always adopt; _applySessionListPayload may skip only an identical paint.
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
       _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};
       _schedulePendingSessionListApply();
+      await _applySessionListPayload(sessData,projData,{unreadGen,deferPaint:true});
       return;
     }
     await _applySessionListPayload(sessData,projData,{unreadGen});
@@ -6692,8 +6722,14 @@ let _sidebarBootCacheSaveTimer = 0;
 let _sidebarBootCacheSaveGeneration = 0;
 
 function _recordSidebarProjection(sessData){
+  // Adoption is independent of receipt and of a completed DOM paint.
   _sidebarShowingLastKnown=false;
   _sidebarSessionValidator=sessData._sidebarValidator ? {...sessData._sidebarValidator,sessData} : null;
+}
+
+function _recordSidebarPaint(sessData){
+  _sidebarShowingLastKnown=false;
+  _sidebarPaintedValidator=sessData._sidebarValidator ? {...sessData._sidebarValidator} : null;
   const list=$('sessionList');
   if(list){list.dataset.freshness='current';list.removeAttribute('aria-busy');}
   const note=$('sidebarCacheStatus');if(note) note.remove();
@@ -6734,7 +6770,7 @@ function _restoreSidebarBootCache(sessionListQS){
       list.setAttribute('aria-busy','true');
       const note=document.createElement('div');
       note.id='sidebarCacheStatus';note.className='sidebar-cache-status';
-      note.setAttribute('role','status');note.textContent='Updating conversations…';
+      note.setAttribute('role','status');note.textContent=t('session_updating_conversations');
       const head=document.querySelector('#panelChat .panel-head');
       if(head) head.insertBefore(note,head.lastElementChild);
     }

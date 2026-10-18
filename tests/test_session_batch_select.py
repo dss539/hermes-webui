@@ -111,8 +111,13 @@ def test_batch_action_bar_is_sidebar_inline_not_global_footer():
         js = f.read()
     with open('static/style.css', encoding="utf-8") as f:
         css = f.read()
-    assert "list.appendChild(batchBar)" in js, \
-        "Batch action bar should be rendered inside the session list"
+    assert "content.appendChild(batchBar)" in js, \
+        "Batch action bar should be rendered inside the session list fragment"
+    start = js.index('function renderSessionListFromCache(')
+    fragment = js.index('const content=document.createDocumentFragment();', start)
+    batch = js.index('content.appendChild(batchBar)', fragment)
+    mount = js.index('list.replaceChildren(content);', batch)
+    assert fragment < batch < mount, "Batch fragment must be mounted in the sidebar list"
     assert "document.body.appendChild(batchBar)" not in js, \
         "Batch action bar must not be mounted as a global footer"
     assert ".batch-action-bar{display:none;margin:" in css, \

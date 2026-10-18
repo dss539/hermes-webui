@@ -1955,8 +1955,6 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-                published_stat = os.fstat(f.fileno())
-                published_identity = (published_stat.st_dev, published_stat.st_ino, published_stat.st_mtime_ns, published_stat.st_size)
             if skip_index:
                 # Callers that explicitly skip the sidebar projection retain
                 # the existing same-session concurrency contract: their unique
@@ -1988,19 +1986,6 @@ class Session:
             except Exception:
                 pass
             raise
-
-        # Derivative maintenance cannot undo a successful canonical save. Keep
-        # guarded full-save facts distinct from metadata-only/index semantics.
-        try:
-            from api.session_summary_index import publish_saved
-            saved_summary = copy.copy(self)
-            saved_summary.__dict__.update(meta)
-            saved_summary.__dict__.update(extra)
-            saved_summary.messages = guarded_messages
-            saved_summary._metadata_message_count = len(guarded_messages)
-            publish_saved(self.path, saved_summary.compact(sidebar_metadata_only=True), published_identity)
-        except Exception:
-            logger.debug("Saved sidebar summary unavailable; JSON remains canonical", exc_info=True)
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -9132,14 +9117,13 @@ def _sqlite_file_stat_cache_key(db_path: Path):
     test) with the cheap file stat stamps as a belt-and-suspenders fallback for
     the case where the fingerprint can't be read.
     """
-    from api.sidebar_revision import sqlite_revision, profile_revision
+    from api.sidebar_revision import profile_revision
 
     return (
         _sqlite_content_fingerprint(db_path),
         _path_stat_cache_key(db_path),
         _path_stat_cache_key(Path(f"{db_path}-wal")),
         _path_stat_cache_key(Path(f"{db_path}-shm")),
-        sqlite_revision(db_path),
         profile_revision(Path(db_path).parent),
     )
 
@@ -9149,8 +9133,8 @@ def _cli_sessions_streaming_freeze_marker():
 
     The CLI/cron sidebar projection (``_load_cli_sessions_uncached``) is gated by
     ``_CLI_SESSIONS_CACHE``, whose key folds in ``_sqlite_file_stat_cache_key`` →
-    ``_sqlite_content_fingerprint`` (``MAX(rowid) FROM messages``). During an
-    active chat turn the gateway/CLI writes a message row per streamed delta, so
+    ``_sqlite_content_fingerprint`` (same-connection ``PRAGMA data_version``).
+    During an active chat turn the gateway/CLI commits message changes, so
     that fingerprint advances on essentially every ``/api/sessions`` poll — busting
     the CLI cache and re-running the expensive candidate-join + projection (and the
     lineage-metadata pass) on every poll, while contending for the same SQLite/global
@@ -11373,7 +11357,9 @@ def get_state_db_regeneration_tail_snapshot(
     else:
         db_path = _active_state_db_path()
     if not db_path.exists():
-        return {"prefix": {"count": 0, "null_timestamp_count": 0}, "prefix_keys": [], "tail": [], "tail_keys": []}
+        # Absence cannot certify a stable empty snapshot: a source may be
+        # appearing/replaced. Refuse the bounded proof and use the full reader.
+        return None
 
     try:
         with closing(open_state_db_readonly(db_path)) as conn:
