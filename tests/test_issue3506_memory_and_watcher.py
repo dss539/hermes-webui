@@ -26,6 +26,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+import pytest
+
 
 # ─────────────────────────── Fix 1: lifecycle leak ───────────────────────────
 
@@ -293,6 +295,10 @@ def test_cheap_fingerprint_message_aggregate_does_not_read_role_payload(
     projection, so this query can stay on the existing covering index.
     """
     gw = importlib.import_module("api.gateway_watcher")
+    # This assertion protects the retained legacy covering-index fallback.
+    # Supported summaries reconcile role counts once per changed commit instead.
+    from api import agent_session_summaries
+    monkeypatch.setattr(agent_session_summaries, 'source_revision', lambda path: None)
     db, conn = _make_db(tmp_path)
     conn.execute(
         "CREATE INDEX idx_messages_session ON messages(session_id, timestamp)"
@@ -324,8 +330,12 @@ def test_cheap_fingerprint_message_aggregate_does_not_read_role_payload(
     ), plan
 
 
-def test_periodic_projection_recovers_role_only_sidebar_visibility_change(tmp_path):
-    """Role-only mutations must not remain invisible forever."""
+@pytest.mark.parametrize('summary_enabled', [False, True])
+def test_periodic_projection_recovers_role_only_sidebar_visibility_change(tmp_path, monkeypatch, summary_enabled):
+    """Legacy parity remains covered; supported role edits are visible immediately."""
+    if not summary_enabled:
+        from api import agent_session_summaries
+        monkeypatch.setattr(agent_session_summaries, 'source_revision', lambda path: None)
     gw = importlib.import_module("api.gateway_watcher")
     db, conn = _make_db(tmp_path)
     _add_session(conn, "cli1", "cli", mc=1, title="Untitled")
@@ -343,6 +353,12 @@ def test_periodic_projection_recovers_role_only_sidebar_visibility_change(tmp_pa
 
     conn.execute("UPDATE messages SET role = 'assistant' WHERE session_id = 'cli1'")
     conn.commit()
+    if summary_enabled:
+        assert gw._cheap_change_fingerprint(db) != initial_fingerprint
+        assert watcher._poll_once(now=2.0) is True
+        assert subscriber.get_nowait()['sessions'] == []
+        assert subscriber.empty()
+        return
     assert gw._cheap_change_fingerprint(db) == initial_fingerprint
 
     before_deadline = 1.0 + watcher.PROJECTION_PARITY_INTERVAL - 1.0

@@ -52,7 +52,13 @@ def _record_connects(monkeypatch):
     calls = []
 
     def spy(target, *args, **kwargs):
-        calls.append({"target": str(target), "uri": bool(kwargs.get("uri"))})
+        if str(target) == ':memory:':
+            # Only the WebUI-owned derivative may be writable. Every disk
+            # connection, including any attempted Agent self-heal, stays logged.
+            from api.agent_session_summaries import _SummaryConnection
+            assert kwargs.get('factory') is _SummaryConnection
+        else:
+            calls.append({"target": str(target), "uri": bool(kwargs.get("uri"))})
         return real_connect(target, *args, **kwargs)
 
     monkeypatch.setattr(agent_sessions.sqlite3, "connect", spy)

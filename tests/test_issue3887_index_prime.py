@@ -88,7 +88,11 @@ def test_listing_does_not_create_missing_index(tmp_path, monkeypatch):
     real_connect = agent_sessions.sqlite3.connect
 
     def recording_connect(*args, **kwargs):
-        connect_calls.append((args, kwargs))
+        if str(args[0]) == ':memory:':
+            from api.agent_session_summaries import _SummaryConnection
+            assert kwargs.get('factory') is _SummaryConnection
+        else:
+            connect_calls.append((args, kwargs))
         return real_connect(*args, **kwargs)
 
     monkeypatch.setattr(agent_sessions.sqlite3, "connect", recording_connect)

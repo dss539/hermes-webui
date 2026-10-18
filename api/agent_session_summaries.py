@@ -85,6 +85,7 @@ class _Reader:
         _SERIAL += 1
         self.serial = _SERIAL
         self.revision = 0
+        self.watcher_revision = 0
 
     def close(self):
         self.source.close()
@@ -170,6 +171,7 @@ class _Reader:
             if schema != self.schema or self.summary is None:
                 self._initialize()
                 self.schema = schema
+                self.watcher_revision += 1
                 _COUNTERS['bootstraps'] += 1
             rows = dict((row[1], row) for row in source.execute(
                 'SELECT rowid,' + ','.join(_quote(c) for c in self.columns) + ' FROM sessions ORDER BY rowid'))
@@ -186,6 +188,11 @@ class _Reader:
             changed = {sid for sid in self.rows.keys() | rows.keys()
                        if _fact_key(self.rows.get(sid)) != _fact_key(rows.get(sid))
                        or _fact_key(self.stats.get(sid)) != _fact_key(stats.get(sid))}
+            source_position = self.columns.index('source') + 1
+            def watched(row):
+                return row is not None and row[source_position] is not None and row[source_position] not in ('cron', 'webui')
+            if any(watched(self.rows.get(sid)) or watched(rows.get(sid)) for sid in changed):
+                self.watcher_revision += 1
             local = self.summary
             with local:
                 local.executemany('DELETE FROM sessions WHERE id=?', [(sid,) for sid in changed])
@@ -223,6 +230,7 @@ def summary_connection(db_path):
     """
     path = Path(db_path).resolve()
     reader = None
+    fallback = None
     with _LOCK:
         try:
             st = path.stat()
@@ -239,16 +247,28 @@ def summary_connection(db_path):
             while len(_READERS) > _MAX_READERS or sum(len(entry.rows) for entry in _READERS.values()) > 65536:
                 _READERS.popitem(last=False)[1].close()
                 _COUNTERS['evictions'] += 1
-        except (OSError, sqlite3.Error, UnsupportedSummary):
+        except UnsupportedSummary:
+            old = _READERS.pop(str(path))
+            # The already-open source is strictly read-only. Reuse it for the
+            # legacy consumer instead of opening a second handle on every read.
+            fallback = old.source
+            if old.summary is not None:
+                old.summary.close()
+            reader = None
+            _COUNTERS['legacy_fallbacks'] += 1
+            _LOG.debug('Unsupported sidebar summary shape; exact legacy reader', exc_info=True)
+        except (OSError, sqlite3.Error):
             old = _READERS.pop(str(path), None)
             if old is not None:
                 old.close()
-            reader = None
-            _COUNTERS['legacy_fallbacks'] += 1
-            _LOG.debug('Sidebar summary unavailable; exact legacy reader', exc_info=True)
+            _COUNTERS['source_read_failures'] += 1
+            # Preserve the original single read-only open/failure contract.
+            # In particular do not retry an open failure with another handle.
+            raise
         if reader is None:
-            from api.agent_sessions import open_state_db_readonly
-            with closing(open_state_db_readonly(path)) as conn:
+            assert fallback is not None
+            fallback.row_factory = None
+            with closing(fallback) as conn:
                 yield conn
         else:
             reader.summary.row_factory = None
@@ -320,4 +340,4 @@ def source_revision(db_path):
     with summary_connection(db_path) as conn:
         if not getattr(conn, 'sidebar_summary', False):
             return None
-        return (conn.sidebar_reader.serial, conn.sidebar_reader.revision)
+        return (conn.sidebar_reader.serial, conn.sidebar_reader.watcher_revision)
