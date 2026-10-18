@@ -158,7 +158,10 @@ class TestSessionsWiring:
 
         assert "if(_sessionListSkeletonActive)return;" in render_body.replace(" ", "")
         assert "_sessionListSkeletonActive = false;" in apply_body
-        assert "renderSessionListFromCache();" in apply_body
+        assert "_flushPendingSidebarPaint();" in apply_body
+        flush_idx = SESSIONS.index("function _flushPendingSidebarPaint(")
+        flush_body = SESSIONS[flush_idx:SESSIONS.index("function _resumePendingSidebarPaint(", flush_idx)]
+        assert "renderSessionListFromCache();" in flush_body
 
     def test_builder_defines_groups_and_function(self):
         assert "const _SESSION_SKELETON_GROUPS" in SESSIONS
@@ -274,7 +277,7 @@ class TestSwitchRaceGuards:
         apply_idx = SESSIONS.index("function _applySessionListPayload(")
         apply_body = SESSIONS[apply_idx: SESSIONS.index("\nfunction _mergeRenderSessionListOptions(", apply_idx)]
         clear_pos = apply_body.find("_sessionListSkeletonActive = false;")
-        paint_pos = apply_body.find("renderSessionListFromCache();")
+        paint_pos = apply_body.find("_flushPendingSidebarPaint();")
         assert clear_pos != -1, "_applySessionListPayload must clear the skeleton flag"
         assert paint_pos != -1 and clear_pos < paint_pos, (
             "the skeleton flag must be cleared right before the authoritative paint"

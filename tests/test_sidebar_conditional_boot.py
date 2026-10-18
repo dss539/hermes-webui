@@ -170,13 +170,13 @@ async function api(path,opts){if(path.startsWith('/api/projects'))return {projec
  reply={unchanged:true,etag:'W/"new"'};
  const revalidated=await _loadSidebarSessionListPayload('?all_profiles=1',{});
  assert.equal(requests[1].headers['If-None-Match'],'W/"new"');
- assert.equal(revalidated.unchanged,false);
+ assert.equal(Object.hasOwn(revalidated,'unchanged'),false);
  assert.equal(revalidated.sessData.sessions[0].session_id,'new');
  _sessionListHasLoadedOnce=true;
  _sidebarSessionValidator={...result.sessData._sidebarValidator,sessData:result.sessData};
  reply={unchanged:true,etag:'W/"new"'};
  result=await _loadSidebarSessionListPayload('?all_profiles=1',{});
- assert.equal(result.unchanged,true);assert.equal(result.sessData.sessions[0].session_id,'new');
+ assert.equal(Object.hasOwn(result,'unchanged'),false);assert.equal(result.sessData.sessions[0].session_id,'new');
  assert.equal(requests[2].headers['If-None-Match'],'W/"new"');
  S.activeProfile='other';reply={data:{sessions:[]},etag:'W/"other"',unchanged:false};
  await _loadSidebarSessionListPayload('?all_profiles=1',{});

@@ -37,6 +37,10 @@ class UnsupportedSummary(Exception):
     """Use the legacy reader rather than approximate an unknown SQL schema."""
 
 
+class UnsupportedBoundedOrder(UnsupportedSummary):
+    """Keep a usable unbounded summary, but select bounded rows on the source."""
+
+
 class _SummaryConnection(sqlite3.Connection):
     sidebar_summary = True
     sidebar_source: sqlite3.Connection
@@ -183,11 +187,13 @@ class _Reader:
         self.rows = {}
         self.stats = {}
 
-    def refresh(self):
+    def refresh(self, *, bounded=False):
         source = self.source
         source.row_factory = None
         version = source.execute('PRAGMA data_version').fetchone()[0]
         if self.summary is not None and version == self.version:
+            if bounded and not self.bounded_order_supported:
+                raise UnsupportedBoundedOrder('uncertified bounded tie order')
             _COUNTERS['unchanged'] += 1
             return
         start = time.perf_counter()
@@ -196,10 +202,17 @@ class _Reader:
         try:
             schema = source.execute('PRAGMA schema_version').fetchone()[0]
             if schema != self.schema or self.summary is None:
+                from api.sidebar_bounded_order import supports_bounded_order
+                self.bounded_order_supported = supports_bounded_order(source)
+                # Validate the source shape even on a bounded fallback. Legacy
+                # unsupported sources retain their original close-per-read
+                # contract instead of entering the persistent-reader cache.
                 self._initialize()
                 self.schema = schema
                 self.watcher_revision += 1
                 _COUNTERS['bootstraps'] += 1
+            if bounded and not self.bounded_order_supported:
+                raise UnsupportedBoundedOrder('uncertified bounded tie order')
             rows = dict((row[1], row) for row in source.execute(
                 'SELECT rowid,' + ','.join(_quote(c) for c in self.columns) + ' FROM sessions ORDER BY rowid'))
             if len(rows) > 65536:
@@ -253,7 +266,7 @@ class _Reader:
 
 
 @contextmanager
-def summary_connection(db_path):
+def summary_connection(db_path, *, bounded=False):
     """Serialize source adoption and SQL consumers; never retain a transaction.
 
     On unsupported schemas/failure callers use their original read-only reader.
@@ -262,6 +275,7 @@ def summary_connection(db_path):
     path = Path(db_path).resolve()
     reader = None
     fallback = None
+    bounded_fallback = False
     with _LOCK:
         try:
             st = path.stat()
@@ -273,11 +287,18 @@ def summary_connection(db_path):
             if reader is None:
                 reader = _Reader(path, identity)
                 _READERS[str(path)] = reader
-            reader.refresh()
+            reader.refresh(bounded=bounded)
             _READERS.move_to_end(str(path))
             while len(_READERS) > _MAX_READERS or sum(len(entry.rows) for entry in _READERS.values()) > 65536:
                 _READERS.popitem(last=False)[1].close()
                 _COUNTERS['evictions'] += 1
+        except UnsupportedBoundedOrder:
+            bounded_fallback = True
+            _READERS.move_to_end(str(path))
+            while len(_READERS) > _MAX_READERS:
+                _READERS.popitem(last=False)[1].close()
+                _COUNTERS['evictions'] += 1
+            _COUNTERS['legacy_fallbacks'] += 1
         except UnsupportedSummary:
             old = _READERS.pop(str(path))
             # The already-open source is strictly read-only. Reuse it for the
@@ -296,7 +317,11 @@ def summary_connection(db_path):
             # Preserve the original single read-only open/failure contract.
             # In particular do not retry an open failure with another handle.
             raise
-        if reader is None:
+        if bounded_fallback:
+            # Retain the useful unbounded cache and its one read-only source.
+            reader.source.row_factory = None
+            yield reader.source
+        elif reader is None:
             assert fallback is not None
             fallback.row_factory = None
             with closing(fallback) as conn:

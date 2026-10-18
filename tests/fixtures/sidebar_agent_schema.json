@@ -1,0 +1,122 @@
+[
+  [
+    "index",
+    "idx_messages_active_null",
+    "CREATE INDEX idx_messages_active_null\n    ON messages(active) WHERE active IS NULL"
+  ],
+  [
+    "index",
+    "idx_messages_assistant_calls_by_session",
+    "CREATE INDEX idx_messages_assistant_calls_by_session\n    ON messages(session_id)\n    WHERE role = 'assistant' AND tool_calls IS NOT NULL"
+  ],
+  [
+    "index",
+    "idx_messages_display_backfill",
+    "CREATE INDEX idx_messages_display_backfill\n    ON messages(session_id) WHERE (display_order IS NULL OR display_identity IS NULL)\n    AND (active = 1 OR compacted = 1)"
+  ],
+  [
+    "index",
+    "idx_messages_display_identity",
+    "CREATE INDEX idx_messages_display_identity\n    ON messages(session_id, display_identity, display_order)\n    WHERE display_identity IS NOT NULL AND (active = 1 OR compacted = 1)"
+  ],
+  [
+    "index",
+    "idx_messages_display_page",
+    "CREATE INDEX idx_messages_display_page\n    ON messages(session_id, display_order, active DESC, id DESC)\n    WHERE active = 1 OR compacted = 1"
+  ],
+  [
+    "index",
+    "idx_messages_platform_msg_id",
+    "CREATE INDEX idx_messages_platform_msg_id ON messages(session_id, platform_message_id) WHERE platform_message_id IS NOT NULL"
+  ],
+  [
+    "index",
+    "idx_messages_session",
+    "CREATE INDEX idx_messages_session ON messages(session_id, timestamp)"
+  ],
+  [
+    "index",
+    "idx_messages_session_active",
+    "CREATE INDEX idx_messages_session_active\n    ON messages(session_id, active, timestamp)"
+  ],
+  [
+    "index",
+    "idx_messages_session_id",
+    "CREATE INDEX idx_messages_session_id ON messages(session_id, id)"
+  ],
+  [
+    "index",
+    "idx_messages_session_uid",
+    "CREATE INDEX idx_messages_session_uid\n    ON messages(session_id, message_uid) WHERE active = 1"
+  ],
+  [
+    "index",
+    "idx_sessions_effective_activity",
+    "CREATE INDEX idx_sessions_effective_activity\n    ON sessions(COALESCE(last_activity_at, started_at) DESC, started_at DESC)"
+  ],
+  [
+    "index",
+    "idx_sessions_gateway_peer",
+    "CREATE INDEX idx_sessions_gateway_peer\n    ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC)"
+  ],
+  [
+    "index",
+    "idx_sessions_handoff_state",
+    "CREATE INDEX idx_sessions_handoff_state\n    ON sessions(handoff_state, started_at)"
+  ],
+  [
+    "index",
+    "idx_sessions_parent",
+    "CREATE INDEX idx_sessions_parent ON sessions(parent_session_id)"
+  ],
+  [
+    "index",
+    "idx_sessions_session_key",
+    "CREATE INDEX idx_sessions_session_key\n    ON sessions(session_key, started_at DESC)"
+  ],
+  [
+    "index",
+    "idx_sessions_source",
+    "CREATE INDEX idx_sessions_source ON sessions(source)"
+  ],
+  [
+    "index",
+    "idx_sessions_source_id",
+    "CREATE INDEX idx_sessions_source_id ON sessions(source, id)"
+  ],
+  [
+    "index",
+    "idx_sessions_started",
+    "CREATE INDEX idx_sessions_started ON sessions(started_at DESC)"
+  ],
+  [
+    "index",
+    "idx_sessions_system_prompt_hash",
+    "CREATE INDEX idx_sessions_system_prompt_hash\n    ON sessions(system_prompt_hash)"
+  ],
+  [
+    "index",
+    "idx_sessions_title_unique",
+    "CREATE UNIQUE INDEX idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL"
+  ],
+  [
+    "index",
+    "idx_sessions_tool_names",
+    "CREATE INDEX idx_sessions_tool_names\n    ON sessions(tool_names)"
+  ],
+  [
+    "table",
+    "messages",
+    "CREATE TABLE messages (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    session_id TEXT NOT NULL REFERENCES sessions(id),\n    role TEXT NOT NULL,\n    content TEXT,\n    tool_call_id TEXT,\n    tool_calls TEXT,\n    tool_name TEXT,\n    effect_disposition TEXT,\n    timestamp REAL NOT NULL,\n    token_count INTEGER,\n    finish_reason TEXT,\n    reasoning TEXT,\n    reasoning_content TEXT,\n    reasoning_details TEXT,\n    codex_reasoning_items TEXT,\n    codex_message_items TEXT,\n    platform_message_id TEXT,\n    observed INTEGER DEFAULT 0,\n    _compressed_summary INTEGER NOT NULL DEFAULT 0,\n    active INTEGER NOT NULL DEFAULT 1,\n    compacted INTEGER NOT NULL DEFAULT 0,\n    api_content TEXT,\n    display_kind TEXT,\n    display_metadata TEXT,\n    display_identity BLOB,\n    display_order INTEGER,\n    message_uid TEXT,\n    absorbed_message_uids TEXT,\n    tool_call_uids TEXT,\n    tool_call_uid TEXT\n)"
+  ],
+  [
+    "table",
+    "sessions",
+    "CREATE TABLE sessions (\n    id TEXT PRIMARY KEY,\n    source TEXT NOT NULL,\n    created_source TEXT,\n    user_id TEXT,\n    session_key TEXT,\n    chat_id TEXT,\n    chat_type TEXT,\n    thread_id TEXT,\n    display_name TEXT,\n    origin_json TEXT,\n    expiry_finalized INTEGER DEFAULT 0,\n    model TEXT,\n    model_config TEXT,\n    system_prompt TEXT,\n    system_prompt_hash TEXT,\n    parent_session_id TEXT,\n    started_at REAL NOT NULL,\n    ended_at REAL,\n    end_reason TEXT,\n    message_count INTEGER DEFAULT 0,\n    tool_call_count INTEGER DEFAULT 0,\n    input_tokens INTEGER DEFAULT 0,\n    output_tokens INTEGER DEFAULT 0,\n    cache_read_tokens INTEGER DEFAULT 0,\n    cache_write_tokens INTEGER DEFAULT 0,\n    reasoning_tokens INTEGER DEFAULT 0,\n    cwd TEXT,\n    git_branch TEXT,\n    git_repo_root TEXT,\n    git_metadata_generation INTEGER NOT NULL DEFAULT 0,\n    billing_provider TEXT,\n    billing_base_url TEXT,\n    billing_mode TEXT,\n    estimated_cost_usd REAL,\n    actual_cost_usd REAL,\n    cost_status TEXT,\n    cost_source TEXT,\n    pricing_version TEXT,\n    title TEXT,\n    title_source TEXT,\n    last_activity_at REAL,\n    last_activity_description TEXT,\n    last_activity_provenance TEXT,\n    api_call_count INTEGER DEFAULT 0,\n    handoff_state TEXT,\n    handoff_platform TEXT,\n    handoff_error TEXT,\n    compression_failure_cooldown_until REAL,\n    compression_failure_error TEXT,\n    compression_fallback_streak INTEGER NOT NULL DEFAULT 0,\n    compression_ineffective_count INTEGER NOT NULL DEFAULT 0,\n    compression_recovery_deadline REAL,\n    compression_overload_streak INTEGER NOT NULL DEFAULT 0,\n    profile_name TEXT,\n    transport_profile TEXT,\n    rewind_count INTEGER NOT NULL DEFAULT 0,\n    archived INTEGER NOT NULL DEFAULT 0,\n    auto_archived INTEGER NOT NULL DEFAULT 0,\n    pinned INTEGER NOT NULL DEFAULT 0,\n    hidden INTEGER NOT NULL DEFAULT 0,\n    last_read_at REAL,\n    tool_names TEXT,\n    FOREIGN KEY (parent_session_id) REFERENCES sessions(id),\n    FOREIGN KEY (system_prompt_hash) REFERENCES system_prompts(hash)\n)"
+  ],
+  [
+    "index",
+    "sqlite_autoindex_sessions_1",
+    null
+  ]
+]

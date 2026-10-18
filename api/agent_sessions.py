@@ -776,7 +776,7 @@ def read_importable_agent_session_rows(
 
     log = log or logger
     from api.agent_session_summaries import summary_connection
-    with summary_connection(db_path) as conn:
+    with summary_connection(db_path, bounded=limit is not None) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
@@ -991,23 +991,9 @@ def read_importable_agent_session_rows(
                 "                    s.started_at DESC"
             )
 
-        if use_messages_join and messages_has_timestamp and messages_index_present:
-            # Aggregate narrow indexed message rows, not a joined copy of every
-            # session column per message. MAX uses the timestamp covering index;
-            # COUNT uses a covering session index. Only the role count reads the
-            # message table. Keep the join fallback for unindexed/older schemas.
-            actual_count_expr = (
-                f"(SELECT COUNT(mx.{count_col}) FROM messages mx WHERE mx.session_id = s.id)"
-            )
-            user_message_count_expr = (
-                "(SELECT COUNT(*) FROM messages mx WHERE mx.session_id = s.id AND LOWER(mx.role) = 'user')"
-                if 'role' in message_cols else actual_count_expr
-            )
-            last_activity_expr = "(SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id)"
-            join_clause = ""
-            group_by_clause = "GROUP BY s.id"
-            # Retain the legacy grouping/sorter, including bounded tie order.
-            order_by_clause = "ORDER BY COALESCE(MAX((SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id=s.id)),s.started_at) DESC"
+        # Non-summary consumers retain the original joined aggregate SQL.
+        # SQLite's bounded tie order depends on the source index layout, not
+        # just the ORDER BY text. Uncertified layouts use this exact legacy path.
 
         if getattr(conn, 'sidebar_summary', False) and use_messages_join:
             # The exact aggregate reconciliation is shared by every SQL consumer.

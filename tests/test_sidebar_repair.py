@@ -107,7 +107,7 @@ def test_bounded_tie_matches_real_cbd7e993_fixture_order(tmp_path, monkeypatch, 
     _db(path)
     if not summary:
         @contextmanager
-        def legacy(db):
+        def legacy(db, **_options):
             with closing(agent_sessions.open_state_db_readonly(db)) as conn:
                 yield conn
         monkeypatch.setattr(summaries, 'summary_connection', legacy)
@@ -209,11 +209,12 @@ def node(script):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize('blocker', ['menu', 'rename'])
+@pytest.mark.parametrize('blocker', ['menu', 'rename', 'rename-save', 'rename-error', 'rename-blur'])
 def test_adopted_payload_paints_when_interaction_releases(blocker):
     source = (ROOT/'static/sessions.js').read_text()
     names = ['_applySessionListPayload', '_recordSidebarProjection', 'closeSessionActionMenu',
-             '_flushPendingSidebarPaint', '_resumePendingSidebarPaint', '_recordSidebarPaint']
+             '_flushPendingSidebarPaint', '_resumePendingSidebarPaint', '_recordSidebarPaint',
+             '_buildSessionRenameStarter']
     functions = '\n'.join(
         source[source.index('function closeSessionActionMenu('):source.index('function _sessionActionMenuShouldIgnoreScrollTarget(')]
         if name == 'closeSessionActionMenu' else extract_function(source, name)
@@ -225,8 +226,12 @@ let _allSessions=[],_sidebarReferenceSessions=[],_allProjects=[],_allSessionsSco
 let _sessionListLoadError=null,_sessionListHasLoadedOnce=false,_sessionListSkeletonActive=false;
 let _sessionListFirstRenderAnimated=true,_sessionListRefreshAnimationPending=false;
 let _renamingSid=null,_sessionActionMenu=null,_sessionActionAnchor=null,_sessionActionSessionId=null,_sessionActionPreviousFocus=null;
-let _sidebarSessionValidator=null,_sidebarReceivedValidator=null,_sidebarPaintedValidator=null,_sidebarPendingPaint=null;
-let _sidebarShowingLastKnown=false,_lastSessionListRenderSig='old',painted=[],idle=0,merged=0,polls=0,stopped=0;
+let _sidebarSessionValidator=null,_sidebarReceivedValidator=null,_sidebarPendingPaint=null;
+let _sidebarShowingLastKnown=false,_lastSessionListRenderSig='old',painted=[],paints=0,idle=0,merged=0,polls=0,stopped=0;
+let _loadingSessionId=null,input;
+const _isReadOnlySession=()=>false,_sessionDisplayTitle=s=>s.title,_markNonCredentialInput=()=>{};
+const document={createElement:()=>({addEventListener(){},isConnected:true,replaceWith(){},focus(){},select(){}})};
+const display={replaceWith:el=>input=el};
 const _optimisticallyRemovedSessionIds=new Set(),S={activeProfile:'default'};
 const list={dataset:{freshness:'old'},removeAttribute(){}};
 const $=id=>id==='sessionList'?list:null;
@@ -239,22 +244,34 @@ const startStreamingPoll=()=>{},stopStreamingPoll=()=>stopped++;
 const ensureSessionTimeRefreshPoll=()=>{},ensureActiveSessionExternalRefreshPoll=()=>{},ensureSessionEventsSSE=()=>{};
 const _sessionListRenderSignature=()=>JSON.stringify(_allSessions);
 const _saveSidebarBootCache=()=>{},_focusSessionActionMenuRestoreTarget=()=>false;
-const renderSessionListFromCache=()=>{if(_renamingSid||_sessionActionMenu)return;painted=_allSessions;return Promise.resolve(true);};
+let rejectRename=false;
+const window={},setStatus=()=>{},showToast=()=>{};
+const api=async()=>{if(rejectRename)throw new Error('synthetic rename failure');return {};};
+const renderSessionListFromCache=()=>{if(_renamingSid||_sessionActionMenu)return;paints++;painted=_allSessions;return Promise.resolve(true);};
 '''
     node(env + functions + '''
 (async()=>{
  const data={sessions:[{session_id:'new',is_streaming:false}]};
  Object.defineProperty(data,'_sidebarValidator',{value:{scope:'s',etag:'new'}});
- if(BLOCK==='menu')_sessionActionMenu={remove(){}};else _renamingSid='old';
+ if(BLOCK==='menu')_sessionActionMenu={remove(){}};
+ else _buildSessionRenameStarter({session_id:'old',title:'Old'},display,()=>{})();
  await _applySessionListPayload(data,{projects:[]},{});
  assert.equal(_allSessions[0].session_id,'new');assert.equal(painted.length,0);
  assert.equal(idle,1);assert.equal(merged,1);assert.equal(polls,1);assert.equal(stopped,1);
  const markedBeforePaint=list.dataset.freshness==='current';
- if(BLOCK==='menu')closeSessionActionMenu();else{_renamingSid=null;if(typeof _resumePendingSidebarPaint==='function')_resumePendingSidebarPaint();}
- await new Promise(r=>setTimeout(r,0));
+ if(BLOCK==='menu')closeSessionActionMenu();
+ else if(BLOCK==='rename')input.onkeydown({key:'Escape',preventDefault(){},stopPropagation(){}});
+ else {
+   input.value='Updated';rejectRename=BLOCK==='rename-error';
+   if(BLOCK==='rename-blur')input.onblur();
+   else input.onkeydown({key:'Enter',preventDefault(){},stopPropagation(){}});
+ }
+ await new Promise(r=>setTimeout(r,90));
  assert.equal(painted[0]?.session_id,'new','release must repaint without another HTTP response');
+ assert.equal(paints,1,'release must not rebuild the same sidebar twice');
  assert.equal(markedBeforePaint,false,'adoption is not paint');
- assert.equal(_sidebarPaintedValidator.etag,'new');assert.equal(list.dataset.freshness,'current');
+ assert.equal(_sidebarPendingPaint,null);assert.equal(list.dataset.freshness,'current');
+ assert.equal(_lastSessionListRenderSig,JSON.stringify(_allSessions));
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''.replace('BLOCK', json.dumps(blocker)))
 

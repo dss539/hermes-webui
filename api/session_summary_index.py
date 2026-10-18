@@ -17,7 +17,7 @@ _LOCK = threading.RLock()
 _STORES = OrderedDict()
 _COUNTERS = Counter()
 _LOG = logging.getLogger(__name__)
-_FORMAT_VERSION = 2
+_FORMAT_VERSION = 3
 
 
 def _image(row):
@@ -49,75 +49,123 @@ class _Store:
     def __init__(self, directory):
         self.path = directory / '_sidebar.db'
         self.conn = sqlite3.connect(self.path, timeout=.05, check_same_thread=False)
+        self.signature = self.index = None
+        self.generation = -1
+        self.entries = {}
+        self.order = []
+        self.metadata = OrderedDict()
         try:
             # Only this disposable WebUI derivative is writable.
             self.conn.execute('PRAGMA journal_mode=WAL')
             self.conn.execute('PRAGMA synchronous=NORMAL')
             self.conn.executescript('''
                 CREATE TABLE IF NOT EXISTS meta (singleton INTEGER PRIMARY KEY,
-                    format_version INTEGER, index_signature TEXT);
+                    format_version INTEGER, index_signature TEXT,
+                    generation INTEGER NOT NULL, index_order TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS rows (session_id TEXT PRIMARY KEY,
-                    index_row_json TEXT NOT NULL, index_position INTEGER NOT NULL);
+                    index_row_json TEXT NOT NULL);
             ''')
             if ({row[1] for row in self.conn.execute('PRAGMA table_info(meta)')} !=
-                    {'singleton', 'format_version', 'index_signature'} or
+                    {'singleton', 'format_version', 'index_signature', 'generation', 'index_order'} or
                     {row[1] for row in self.conn.execute('PRAGMA table_info(rows)')} !=
-                    {'session_id', 'index_row_json', 'index_position'}):
+                    {'session_id', 'index_row_json'}):
                 raise ValueError('unsupported WebUI summary schema')
-            version = self.conn.execute('SELECT format_version FROM meta WHERE singleton=1').fetchone()
-            if version is None:
-                self.conn.execute('INSERT INTO meta VALUES (1,?,NULL)', (_FORMAT_VERSION,))
-                self.conn.commit()
-            elif version != (_FORMAT_VERSION,):
-                raise ValueError('unsupported WebUI summary index')
-            # Keep the actual encoded images once, not a full SELECT per save.
-            self.entries = {sid: (json.loads(encoded), encoded, position)
-                            for sid, encoded, position in self.conn.execute(
-                                'SELECT session_id,index_row_json,index_position FROM rows')}
+            self.conn.execute('INSERT OR IGNORE INTO meta VALUES (1,?,NULL,0,\'[]\')', (_FORMAT_VERSION,))
+            self.conn.commit()
+            self.conn.execute('BEGIN')
+            try:
+                self.sync()
+            finally:
+                self.conn.rollback()
         except Exception:
             self.conn.close()
             raise
-        self.signature = None
-        self.index = None
-        self.metadata = OrderedDict()
 
-    def publish(self, path, rows, signature):
+    def sync(self):
+        """Observe generation AND row images in the caller's SQLite transaction."""
+        version, saved, generation, order = self.conn.execute(
+            'SELECT format_version,index_signature,generation,index_order FROM meta WHERE singleton=1').fetchone()
+        if version != _FORMAT_VERSION:
+            raise ValueError('unsupported WebUI summary index')
+        if generation != self.generation:
+            entries = {sid: (json.loads(encoded), encoded) for sid, encoded in
+                       self.conn.execute('SELECT session_id,index_row_json FROM rows')}
+            order = json.loads(order)
+            if len(order) != len(entries) or set(order) != entries.keys():
+                raise ValueError('inconsistent WebUI summary order')
+            self.entries, self.order = entries, order
+            self.generation = generation
+            self.signature = self.index = None
+            _COUNTERS['generation_reloads'] += 1
+        return saved
+
+    def publish(self, path, rows, signature, *, updates=None, order=None, previous_source=None):
         if signature is None or path_revision(path) != signature:
             return
-        entries = {}
-        images = []
-        changed = []
-        for position, row in enumerate(rows):
-            image = _image(row)
-            sid = str(image['session_id'])
-            if sid in entries:
-                raise ValueError('duplicate compatibility index ids')
-            old = self.entries.get(sid)
-            if old is not None and _same_image(image, old[0]):
-                image, encoded = old[:2]
+        self.conn.execute('BEGIN IMMEDIATE')
+        try:
+            saved = self.sync()
+            # A targeted writer knows which canonical rows it replaced. Trust
+            # that delta only if the derivative certifies the exact input file
+            # the writer read; external canonical rewrites require a full walk.
+            incremental = (updates is not None and order is not None and previous_source is not None
+                           and saved == json.dumps(previous_source))
+            if incremental:
+                if len(order) != len(set(order)) or not set(order) <= self.entries.keys() | updates.keys():
+                    raise ValueError('invalid compatibility index delta')
+                source_rows = updates.values()
+                _COUNTERS['delta_publishes'] += 1
             else:
+                source_rows = rows
+                order = []
+                _COUNTERS['full_publishes'] += 1
+            changed = []
+            seen = set()
+            for row in source_rows:
+                _COUNTERS['index_rows_examined'] += 1
+                image = _image(row)
+                sid = str(image['session_id'])
+                if sid in seen:
+                    raise ValueError('duplicate compatibility index ids')
+                seen.add(sid)
+                if not incremental:
+                    order.append(sid)
+                old = self.entries.get(sid)
+                if old is not None and _same_image(image, old[0]):
+                    continue
                 encoded = json.dumps(image, ensure_ascii=True)
                 if len(encoded) > 65536:
                     raise ValueError('unbounded compatibility row; use legacy JSON reader')
-                image = copy.deepcopy(image)
+                changed.append((sid, copy.deepcopy(image), encoded))
                 _COUNTERS['index_rows_encoded'] += 1
-            entry = (image, encoded, position)
-            entries[sid] = entry
-            images.append(image)
-            if old is None or old[1:] != entry[1:]:
-                changed.append((sid, encoded, position))
-        with self.conn:
-            self.conn.executemany('DELETE FROM rows WHERE session_id=?',
-                                  [(sid,) for sid in self.entries.keys() - entries.keys()])
-            self.conn.executemany('''INSERT INTO rows VALUES (?,?,?)
-                ON CONFLICT(session_id) DO UPDATE SET index_row_json=excluded.index_row_json,
-                    index_position=excluded.index_position''', changed)
-            self.conn.execute('UPDATE meta SET index_signature=? WHERE singleton=1', (json.dumps(signature),))
-        _COUNTERS['index_rows_changed'] += len(changed)
-        self.entries = entries
-        if path_revision(path) == signature:
-            self.signature = signature
-            self.index = images
+            deleted = self.entries.keys() - set(order)
+            if path_revision(path) != signature:
+                return
+            self.conn.executemany('DELETE FROM rows WHERE session_id=?', [(sid,) for sid in deleted])
+            self.conn.executemany('''INSERT INTO rows VALUES (?,?)
+                ON CONFLICT(session_id) DO UPDATE SET index_row_json=excluded.index_row_json''',
+                [(sid, encoded) for sid, image, encoded in changed])
+            self.conn.execute('UPDATE meta SET index_signature=?,generation=generation+1,index_order=? WHERE singleton=1',
+                              (json.dumps(signature), json.dumps(order)))
+            self.conn.commit()
+            generation = self.generation + 1
+            # If installation of the process-local delta fails after commit,
+            # the next transaction must reload the committed row map.
+            self.generation = -1
+            self.signature = self.index = None
+            for sid in deleted:
+                del self.entries[sid]
+            for sid, image, encoded in changed:
+                self.entries[sid] = (image, encoded)
+            self.order = order
+            self.generation = generation
+            # Materialize the complete list only when a reader needs it, not on
+            # the message-save path. Order is one O(ids) image, not N SQL writes
+            # whenever an updated conversation moves to the top.
+            self.signature = self.index = None
+            _COUNTERS['index_rows_changed'] += len(changed)
+        finally:
+            self.conn.rollback()
 
 
 def _store(directory):
@@ -132,10 +180,8 @@ def _store(directory):
         except (sqlite3.DatabaseError, ValueError) as exc:
             if isinstance(exc, sqlite3.DatabaseError) and getattr(exc, 'sqlite_errorcode', None) not in (
                     sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
-                # Busy/permission/I/O failures are not corrupt-cache evidence.
                 raise
-            # Rebuild a corrupt/old disposable file ONCE. Permission/open/source
-            # failures still take the canonical fallback, never touch JSON.
+            # Only recognized corrupt/old disposable files, never canonical JSON.
             for suffix in ('', '-wal', '-shm'):
                 Path(key, '_sidebar.db' + suffix).unlink(missing_ok=True)
             store = _Store(Path(key))
@@ -158,41 +204,48 @@ def read_index(path):
         with _LOCK:
             store = _store(path.parent)
             signature = path_revision(path)
-            if signature is not None and signature == store.signature:
-                _COUNTERS['index_hits'] += 1
-                return copy.deepcopy(store.index)
-            saved = store.conn.execute('SELECT index_signature FROM meta WHERE singleton=1').fetchone()[0]
-            if signature is not None and saved == json.dumps(signature):
-                rows = [entry[0] for entry in sorted(store.entries.values(), key=lambda entry: entry[2])]
-                if path_revision(path) == signature:
-                    store.index = rows
-                    store.signature = signature
-                    _COUNTERS['index_disk_hits'] += 1
-                    return copy.deepcopy(rows)
+            store.conn.execute('BEGIN')
+            try:
+                saved = store.sync()
+                if signature is not None and saved == json.dumps(signature):
+                    if signature == store.signature:
+                        _COUNTERS['index_hits'] += 1
+                    else:
+                        store.index = [store.entries[sid][0] for sid in store.order]
+                        store.signature = signature
+                        _COUNTERS['index_disk_hits'] += 1
+                    if path_revision(path) == signature:
+                        return copy.deepcopy(store.index)
+            finally:
+                store.conn.rollback()
             rows = json.loads(path.read_bytes())
             _COUNTERS['full_index_parses'] += 1
             if not isinstance(rows, list):
                 raise ValueError('index must be a list')
             store.publish(path, rows, signature)
+            if path_revision(path) == signature:
+                store.index = [store.entries[sid][0] for sid in store.order]
+                store.signature = signature
             return [_image(row) for row in rows]
     except Exception:
         _COUNTERS['index_fallbacks'] += 1
-        # Preserve missing/corrupt-index recovery and malformed-row behavior.
         return json.loads(path.read_bytes())
 
 
-def publish_index(path, rows, expected_source=None):
+def publish_index(path, rows, expected_source=None, *, updates=None, order=None, previous_source=None):
     """Best effort after canonical replace, under existing writer serialization.
 
-    Bind input rows to the temporary file's pre-publication identity/mtime/size.
-    A later external writer must not bless our older rows under its new stamp.
+    Bind rows to the temporary file's pre-publication identity/mtime/size. The
+    optional delta also names the exact previous canonical file; never apply a
+    changed-id hint across an external rewrite or a missing derivative.
     """
     try:
         with _LOCK:
             signature = path_revision(path)
             if signature is None or signature[:3] + signature[4:] != expected_source:
                 return
-            _store(Path(path).parent).publish(Path(path), rows, signature)
+            _store(Path(path).parent).publish(Path(path), rows, signature,
+                updates=updates, order=order, previous_source=previous_source)
     except Exception:
         _COUNTERS['publish_failures'] += 1
         _LOG.debug('WebUI summary maintenance failed; JSON retained', exc_info=True)
@@ -204,25 +257,24 @@ def metadata_compact(path, index_message_count, loader):
     signature = path_revision(path)
     if signature is None:
         return loader()
-    key = (path.stem, signature, index_message_count)
+    key = (signature, index_message_count)
     try:
         with _LOCK:
             store = _store(path.parent)
-            hit = store.metadata.get(key)
-            if hit is not None:
-                store.metadata.move_to_end(key)
+            hit = store.metadata.get(path.stem)
+            if hit is not None and hit[0] == key:
+                store.metadata.move_to_end(path.stem)
                 _COUNTERS['metadata_hits'] += 1
-                return copy.deepcopy(hit)
+                return copy.deepcopy(hit[1])
         row = loader()
         _COUNTERS['metadata_loads'] += 1
         if row is None or path_revision(path) != signature:
             return row
         with _LOCK:
             store = _store(path.parent)
-            # Only the current canonical generation is useful for this id.
-            for old in [old for old in store.metadata if old[0] == path.stem]:
-                store.metadata.pop(old)
-            store.metadata[key] = copy.deepcopy(row)
+            # Exactly one generation per stem: replacement and eviction are O(1).
+            store.metadata[path.stem] = (key, copy.deepcopy(row))
+            store.metadata.move_to_end(path.stem)
             while len(store.metadata) > 2000:
                 store.metadata.popitem(last=False)
         return row
