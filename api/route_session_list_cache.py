@@ -520,7 +520,7 @@ def _session_list_cache_streaming_freeze_marker():
 
     During an active chat turn the gateway/CLI writes message rows to state.db
     continuously. Each write advances the WAL stat and the content fingerprint
-    (same-connection ``PRAGMA data_version``) that ``_session_list_cache_source_stamp``
+    (``MAX(rowid)`` of ``messages``) that ``_session_list_cache_source_stamp``
     folds in, so the source stamp changes on essentially every ``/api/sessions``
     poll — popping the cache and forcing a full ``all_sessions()`` rebuild
     mid-stream. That rebuild then contends for the global ``LOCK`` the streaming
