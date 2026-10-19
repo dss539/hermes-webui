@@ -107,7 +107,6 @@ async function fetch(url,opts){options=opts;return response;}
 BOOT_ENV = '''
 const assert=require('node:assert/strict');
 const S={activeProfile:'default'};
-const t=key=>key==='session_updating_conversations'?'Updating conversations…':key;
 let _sessionListHasLoadedOnce=false,_allSessions=[],_sidebarReferenceSessions=[],_allProjects=[];
 let _profileSwitchListEmbargo=false,_sessionListSkeletonActive=false,_allSessionsScope=null,_showAllProfiles=true;
 let paints=0,stored=null,notes=[];

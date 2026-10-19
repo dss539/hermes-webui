@@ -1005,9 +1005,10 @@ def read_importable_agent_session_rows(
             )
             last_activity_expr = "(SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id)"
             join_clause = ""
-            group_by_clause = "GROUP BY s.id"
-            # Retain the legacy grouping/sorter, including bounded tie order.
-            order_by_clause = "ORDER BY COALESCE(MAX((SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id=s.id)),s.started_at) DESC"
+            group_by_clause = ""
+            # The grouped query visits equal-activity rows in id order. Preserve
+            # that tie order when the GROUP BY is no longer necessary.
+            order_by_clause = "ORDER BY COALESCE(last_activity, s.started_at) DESC, s.id"
 
         if getattr(conn, 'sidebar_summary', False) and use_messages_join:
             # The exact aggregate reconciliation is shared by every SQL consumer.
@@ -1016,8 +1017,8 @@ def read_importable_agent_session_rows(
             user_message_count_expr = "COALESCE((SELECT actual_user_message_count FROM _sidebar_message_stats ms WHERE ms.session_id=s.id),0)"
             last_activity_expr = "(SELECT last_activity FROM _sidebar_message_stats ms WHERE ms.session_id=s.id)"
             join_clause = ""
-            group_by_clause = "GROUP BY s.id"
-            order_by_clause = "ORDER BY COALESCE(MAX((SELECT last_activity FROM _sidebar_message_stats ms WHERE ms.session_id=s.id)),s.started_at) DESC"
+            group_by_clause = ""
+            order_by_clause = "ORDER BY COALESCE(last_activity,s.started_at) DESC,s.id"
             if messages_index_present:
                 candidate_order_clause = "ORDER BY COALESCE((SELECT last_activity FROM _sidebar_message_stats ms WHERE ms.session_id=s.id),s.started_at) DESC,s.started_at DESC"
                 latest_messages_cte = None

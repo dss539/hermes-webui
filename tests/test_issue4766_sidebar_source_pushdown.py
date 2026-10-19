@@ -482,9 +482,6 @@ global._renamingSid = null;
 global._sessionActionMenu = null;
 global.S = {{ activeProfile: 'default' }};
 global._recordSidebarProjection = () => {{}};
-global._recordSidebarPaint = () => {{}};
-global._sidebarPendingPaint = null;
-{_extract_function(src, '_flushPendingSidebarPaint')}
 global._reconcileActiveSessionIdleStateFromList = rows => rows;
 global._mergeOptimisticFirstTurnSessions = rows => rows;
 global._sessionListRenderSignature = () => '';

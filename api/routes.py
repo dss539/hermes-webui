@@ -2826,11 +2826,10 @@ def _get_cached_session_list_payload(
 
     # Provision system chips before capturing the authoritative build's source
     # stamp. No source component is ignored or restamped after the build.
-    scope = _route_session_list_cache.session_list_cache_scope(key)
-    if scope and scope.all_profiles and scope.show_cli_sessions and scope.exclude_hidden and scope.sidebar_source == 'webui':
+    if len(key) > 11 and key[1] and key[2] and key[6] and key[11] == 'webui':
         from api.models import prepare_sidebar_system_projects
         try:
-            prepare_sidebar_system_projects(all_profiles=True, source_filter=scope.source_filter)
+            prepare_sidebar_system_projects(all_profiles=True, source_filter=key[10])
         except Exception:
             # Optional normalization must retain the builder's existing corrupt
             # or unavailable-source recovery rather than fail the whole route.
@@ -2958,8 +2957,7 @@ def _get_cached_session_list_payload(
     # The all-profile WebUI sidebar must not reuse rows whose source revision
     # changed. Preserve bounded stale fallback for the other legacy consumers;
     # this scope instead takes the existing independent-rebuild safety path.
-    scope = _route_session_list_cache.session_list_cache_scope(key)
-    current_sidebar = bool(scope and scope.all_profiles and scope.exclude_hidden and scope.sidebar_source == "webui")
+    current_sidebar = len(key) > 11 and key[1] and key[6] and key[11] == "webui"
     if stale is not None and not (current_sidebar and stale_reason == "source"):
         if diag is not None:
             try:
@@ -11597,10 +11595,6 @@ def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None
     installs should not ship tens of KB of per-row detail just to render a
     conversation title.
     """
-    # Production cbd7e993 used insertion order cold and set-iteration order on
-    # cache hits (route_session_list_cache.py:47,148), varying across restarts.
-    # Object key order is excluded from equivalence; values/types/key presence
-    # and list order remain exact. Determinism avoids false client signature churn.
     # Keep cold-builder and bounded-cache responses in the same property order.
     # The browser's no-op signature must not change on the first cache hit.
     item = {

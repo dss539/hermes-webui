@@ -1,7 +1,9 @@
 """Conditional sidebar responses; validators cover the actual runtime overlay."""
 
 import hashlib
-from api.helpers import j, flush_pending_auth_cookies, _security_headers, _json_response_body
+import json
+
+from api.helpers import j, flush_pending_auth_cookies, _security_headers
 
 
 def session_list_etag(response, scope):
@@ -9,7 +11,7 @@ def session_list_etag(response, scope):
     # Include runtime flags, redacted values, timezone and request scope, not
     # just the database stamp: those can change independently of a DB commit.
     stable = {key: value for key, value in response.items() if key != 'server_time'}
-    encoded = _json_response_body((scope, stable), pretty=False)
+    encoded = json.dumps((scope, stable), sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
     return 'W/"' + hashlib.sha256(encoded).hexdigest() + '"'
 
 

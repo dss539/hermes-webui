@@ -5,7 +5,7 @@ import os
 import re
 import threading
 import time
-from collections import OrderedDict, namedtuple
+from collections import OrderedDict
 from pathlib import Path
 
 from api.config import LOCK, SESSION_DIR, SESSIONS, SETTINGS_FILE
@@ -321,20 +321,6 @@ def _session_list_cache_profile_scope(profile: str | None) -> str:
     return normalized
 
 
-SessionListCacheScope = namedtuple('SessionListCacheScope', (
-    'profile', 'all_profiles', 'show_cli_sessions', 'show_previous_messaging_sessions',
-    'show_cron_sessions', 'include_archived', 'exclude_hidden', 'visible_only',
-    'show_webhook_sessions', 'show_kanban_sessions', 'source_filter',
-    'sidebar_source', 'archived_limit', 'archived_offset',
-))
-
-
-def session_list_cache_scope(key):
-    """Named view of the shared key; route-specific suffixes remain opaque."""
-    width = len(SessionListCacheScope._fields)
-    return SessionListCacheScope(*key[:width]) if len(key) >= width else None
-
-
 def _session_list_cache_key(
     active_profile: str | None,
     all_profiles: bool,
@@ -361,7 +347,7 @@ def _session_list_cache_key(
         normalized_archived_offset = max(0, int(archived_offset or 0))
     except (TypeError, ValueError):
         normalized_archived_offset = 0
-    return SessionListCacheScope(
+    return (
         _session_list_cache_profile_scope(active_profile),
         bool(all_profiles),
         bool(show_cli_sessions),
@@ -625,17 +611,8 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple:
         session_index_path = _session_list_cache_session_dir() / "_index.json"
     except Exception:
         session_index_path = None
-    from api.sidebar_revision import webui_revision, profile_revision
+    from api.sidebar_revision import sqlite_revision, webui_revision, profile_revision
     from api.models import PROJECTS_FILE
-
-    # All-profile contexts include the active source too. Observe each source
-    # once in THIS stamp, without memoizing across the before/after fences.
-    fingerprints = {}
-    def fingerprint(path):
-        identity = str(Path(path).absolute()) if path is not None else None
-        if identity not in fingerprints:
-            fingerprints[identity] = _session_list_cache_state_db_fingerprint(path)
-        return fingerprints[identity]
 
     all_profiles_state_stamp = None
     if _cache_all_profiles:
@@ -647,7 +624,8 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple:
                     _session_list_cache_path_stamp(ctx_db),
                     _session_list_cache_path_stamp(ctx_db.with_name(f"{ctx_db.name}-wal") if ctx_db else None),
                     str(ctx_db),
-                    fingerprint(ctx_db),
+                    _session_list_cache_state_db_fingerprint(ctx_db),
+                    sqlite_revision(ctx_db),
                     profile_revision(_home),
                 )
                 for _home, ctx_db, _prof in contexts
@@ -665,9 +643,10 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple:
         # above can collide under WAL-mode writes (same mtime_ns bucket + WAL
         # frame size), so without this a freshly-committed CLI/gateway session
         # could be served stale for the cache TTL. Mirrors the models-layer fix.
-        fingerprint(state_db_path),
+        _session_list_cache_state_db_fingerprint(state_db_path),
         all_profiles_state_stamp,
         swv,
+        sqlite_revision(state_db_path) if state_db_path is not None else None,
         webui_revision(_session_list_cache_session_dir(), PROJECTS_FILE),
         profile_revision(state_db_path.parent) if state_db_path is not None else None,
     )

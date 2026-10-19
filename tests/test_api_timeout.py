@@ -258,13 +258,7 @@ def test_passive_background_polls_suppress_timeout_toasts():
     assert "api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false})" in workspace
     assert "const sessionRequestOpts={" in sessions
     assert "timeoutToast:false" in sessions
-    # Request options now pass through the conditional loader; pin the entire
-    # forwarding chain, not merely the existence of a timeoutToast elsewhere.
-    assert "_loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)" in sessions
-    start = sessions.index('async function _loadSidebarSessionListPayload(')
-    loader = sessions[start:sessions.index('async function _drainRenderSessionListQueue(', start)]
-    assert "api('/api/sessions' + sessionListQS,{" in loader
-    assert "...sessionRequestOpts,responseMeta:true,cache:'no-store'" in loader
+    assert "api('/api/sessions' + sessionListQS,sessionRequestOpts)" in sessions
     assert "api('/api/projects' + projectQS,{timeoutToast:false})" in sessions
     assert "api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false})" in sessions
     assert 'api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false})' in messages
