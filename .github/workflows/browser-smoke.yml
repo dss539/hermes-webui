@@ -129,10 +129,6 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_project_picker_keyboard.py
 
-      - name: Run sidebar incremental redraw gate
-        if: needs.changes.outputs.docs_only != 'true'
-        run: python tests/browser_sidebar_incremental.py
-
       - name: Run image lightbox zoom gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_image_lightbox_zoom.py --engine chromium

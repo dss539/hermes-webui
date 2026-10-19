@@ -938,9 +938,6 @@ function _writeSessionCompletionUnreadCleared(sidOrSids, clearedAt) {
     try { localStorage.removeItem(SESSION_COMPLETION_UNREAD_CLEARED_KEY); } catch (_) {}
   }
 
-  // Baseline initialization can batch housekeeping for one synchronous sidebar
-  // paint. The per-session ordering fact above is still durable immediately.
-  if(arguments[2]===true) return;
   const persistedCleared = _readPersistedSessionCompletionUnreadCleared();
   let keys = [];
   try {
@@ -1191,25 +1188,13 @@ function _forgetObservedStreamingSession(sid) {
   _saveSessionObservedStreaming();
 }
 
-let _sidebarUnreadBaselineBatch = null;
-
 function _hasUnreadForSession(s) {
   if (!s || !s.session_id) return false;
   if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
   const generation = _sessionTranscriptGenerationForUnread(s.session_id, s.transcript_generation);
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
-    if(typeof _sidebarUnreadBaselineBatch!=='undefined'&&_sidebarUnreadBaselineBatch){
-      counts[s.session_id]=_sessionViewedCountRecord(Number(s.message_count||0),generation);
-      // Preserve intent ordering, including clears of markers prepared in
-      // another tab but not yet stored. Only map saves/pruning are batched.
-      const order=_nextSessionCompletionUnreadOrder(s.session_id);
-      _writeSessionCompletionUnreadCleared(s.session_id,order,true);
-      _sidebarUnreadBaselineBatch.clears.set(s.session_id,order);
-      _sidebarUnreadBaselineBatch.dirty=true;
-    }else{
-      _setSessionViewedCount(s.session_id, Number(s.message_count || 0), generation);
-    }
+    _setSessionViewedCount(s.session_id, Number(s.message_count || 0), generation);
     return false;
   }
   const viewed = _sessionViewedCountRecord(counts[s.session_id]);
@@ -4722,11 +4707,6 @@ function _sessionPrefersReducedMotion(){
 }
 
 function _makeSessionSwipeAffordance(side, icon, label){
-  // All visible rows use the same small set of translated affordances. Clone
-  // their inert markup instead of parsing the same SVG twice for every row.
-  const key=JSON.stringify([side,icon,label]);
-  const templates=_makeSessionSwipeAffordance._templates||(_makeSessionSwipeAffordance._templates=new Map());
-  if(templates.has(key)) return templates.get(key).cloneNode(true);
   const affordance=document.createElement('div');
   affordance.className='session-swipe-affordance session-swipe-affordance-'+side;
   affordance.setAttribute('aria-hidden','true');
@@ -4740,12 +4720,10 @@ function _makeSessionSwipeAffordance(side, icon, label){
   text.textContent=label;
   stack.append(badge,text);
   affordance.append(stack);
-  if(templates.size>=8) templates.clear();
-  templates.set(key,affordance);
-  return affordance.cloneNode(true);
+  return affordance;
 }
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
-const SESSION_VIRTUAL_BUFFER_ROWS = 4;
+const SESSION_VIRTUAL_BUFFER_ROWS = 12;
 const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
 let _sessionVirtualScrollList = null;
 let _sessionVirtualScrollRaf = 0;
@@ -8759,9 +8737,6 @@ function _attachProjectQuickCreateButton(chip, project){
 }
 
 
-// Retain only the current virtual window, not one DOM row per stored session.
-let _sessionRowDomCache = new Map();
-
 function renderSessionListFromCache(){
   // #4671: while a profile-switch skeleton is up, bail — _allSessions still holds the
   // PREVIOUS profile's rows until /api/sessions resolves, so any unrelated caller
@@ -8778,10 +8753,6 @@ function renderSessionListFromCache(){
   // all call this while the fixed-position menu is open; rebuilding the row DOM
   // here removes the anchor and makes the menu feel unclickable.
   if(_sessionActionMenu) return;
-  const previousBaselineBatch=typeof _sidebarUnreadBaselineBatch!=='undefined'?_sidebarUnreadBaselineBatch:null;
-  const baselineBatch=previousBaselineBatch||{dirty:false,clears:new Map()};
-  if(typeof _sidebarUnreadBaselineBatch!=='undefined') _sidebarUnreadBaselineBatch=baselineBatch;
-  try{
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
@@ -8832,17 +8803,7 @@ function renderSessionListFromCache(){
   const committedSwipeDuration=_sessionPrefersReducedMotion()?0:SESSION_SWIPE_DURATION_MS;
   const committedSwipeReflowDelay=Math.max(0,committedSwipeDuration-SESSION_SWIPE_REFLOW_LEAD_MS);
   const listScrollTopBeforeRender=list.scrollTop||0;
-  // Build off-document. Reading media queries/viewport metrics while appending
-  // each group to the live list used to repeatedly flush sidebar style/layout.
-  const content=document.createDocumentFragment();
-  const previousRowCache=typeof _sessionRowDomCache!=='undefined'?_sessionRowDomCache:new Map();
-  const nextRowCache=new Map();
-  const rowContext=JSON.stringify([
-    searchQueryRaw, !!_sessionSelectMode, [..._selectedSessions],
-    window._sidebarDensity, !!_showAllProfiles, _allProjects,
-    document.documentElement.lang, Math.floor(_serverNowMs()/60000),
-    committedSwipeDuration,
-  ]);
+  list.innerHTML='';
   // #4671: belt-and-suspenders. The authoritative skeleton-clear happens in
   // _applySessionListPayload (once fresh data is in hand) BEFORE this function is
   // reached, and the guard at the top of renderSessionListFromCache bails while the
@@ -8861,17 +8822,17 @@ function renderSessionListFromCache(){
     selectAllBtn.textContent=t('session_select_all');
     selectAllBtn.onclick=(e)=>{e.stopPropagation();selectAllSessions();};
     selectBar.appendChild(selectAllBtn);
-    content.appendChild(selectBar);
+    list.appendChild(selectBar);
   }
   // Ensure batch action bar exists in DOM
   let batchBar=$('batchActionBar');
   if(!batchBar){batchBar=document.createElement('div');batchBar.id='batchActionBar';batchBar.className='batch-action-bar';}
-  content.appendChild(batchBar);
-  if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';}
+  list.appendChild(batchBar);
+  if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
   else{batchBar.style.display='none';}
   if(_sessionListLoadError){
     const note=_renderSessionListLoadErrorNote();
-    if(note) content.appendChild(note);
+    if(note) list.appendChild(note);
   }
   if(window._showCliSessions || cliSessionCount>0){
     const sourceTabs=document.createElement('div');
@@ -8886,7 +8847,7 @@ function renderSessionListFromCache(){
       btn.onclick=()=>_setSessionSourceFilter(filter);
       sourceTabs.appendChild(btn);
     }
-    content.appendChild(sourceTabs);
+    list.appendChild(sourceTabs);
   }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
@@ -8985,7 +8946,7 @@ function renderSessionListFromCache(){
     addBtn.title='New project';
     addBtn.onclick=(e)=>{e.stopPropagation();_startProjectCreate(bar,addBtn);};
     bar.appendChild(addBtn);
-    content.appendChild(bar);
+    list.appendChild(bar);
   }
   // Profile filter toggle (show sessions from other profiles).
   // Cross-profile rows live SERVER-SIDE behind ?all_profiles=1, so the toggle
@@ -8998,13 +8959,13 @@ function renderSessionListFromCache(){
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     pfToggle.textContent='Show '+otherProfileCount+' from other profiles';
     pfToggle.onclick=()=>{_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});};
-    content.appendChild(pfToggle);
+    list.appendChild(pfToggle);
   } else if(_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     pfToggle.textContent='Show active profile only';
     pfToggle.onclick=()=>{_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});};
-    content.appendChild(pfToggle);
+    list.appendChild(pfToggle);
   }
   // Show/hide archived toggle if there are archived sessions. Archived rows
   // are fetched on demand so large histories do not bloat every sidebar poll.
@@ -9017,19 +8978,19 @@ function renderSessionListFromCache(){
       if(_showArchived) _archivedRowsLoadedLimit=SESSION_ARCHIVED_PAGE_SIZE;
       renderSessionList();
     };
-    content.appendChild(toggle);
+    list.appendChild(toggle);
   }
   // Empty state for active project filter
   if(_sessionSourceFilter==='cli'&&sessions.length===0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
     empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
-    content.appendChild(empty);
+    list.appendChild(empty);
   } else if(_activeProject&&sessions.length===0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
     empty.textContent=_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.';
-    content.appendChild(empty);
+    list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort(_sessionSidebarSortCompare);
   // Separate pinned from unpinned
@@ -9200,7 +9161,19 @@ function renderSessionListFromCache(){
     if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
     if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
     wrapper.appendChild(body);
-    content.appendChild(wrapper);
+    list.appendChild(wrapper);
+  }
+  if(virtualAnchorScrollTop!==null){
+    list.scrollTop=virtualAnchorScrollTop;
+  }else if(listScrollTopBeforeRender>0){
+    // Always restore the user's scroll position after re-render, regardless
+    // of whether the virtualization window applies. Lists below the
+    // virtualization threshold (≤80 rows) still have their DOM rebuilt by
+    // every renderSessionListFromCache() call, and without this restore the
+    // scrollTop drops to 0 — producing a "scroll keeps jumping back" feel
+    // when the list scrolls naturally. Fixed for #1669 follow-up.
+    list.scrollTop=listScrollTopBeforeRender;
+    _resyncSessionVirtualWindowAfterRender(list, listScrollTopBeforeRender, virtualWindow);
   }
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
@@ -9220,7 +9193,7 @@ function renderSessionListFromCache(){
         );
         renderSessionList();
       };
-      content.appendChild(more);
+      list.appendChild(more);
     }
   }
   // Select mode toggle button (only when NOT in select mode)
@@ -9228,18 +9201,7 @@ function renderSessionListFromCache(){
     const toggleBtn=document.createElement('div');toggleBtn.className='session-select-toggle';
     toggleBtn.textContent=t('session_select_mode');
     toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
-    content.appendChild(toggleBtn);
-  }
-  list.replaceChildren(content);
-  if(typeof _sessionRowDomCache!=='undefined') _sessionRowDomCache=nextRowCache;
-  if(_sessionSelectMode&&_selectedSessions.size>0) _renderBatchActionBar();
-  if(virtualAnchorScrollTop!==null){
-    list.scrollTop=virtualAnchorScrollTop;
-  }else if(listScrollTopBeforeRender>0){
-    // Restore only after the complete new subtree is mounted, so the browser
-    // cannot clamp the scroll against a partially rebuilt list.
-    list.scrollTop=listScrollTopBeforeRender;
-    _resyncSessionVirtualWindowAfterRender(list, listScrollTopBeforeRender, virtualWindow);
+    list.appendChild(toggleBtn);
   }
   // Refresh FLIP and queued archive/delete reflow both drive
   // --session-reflow-offset. Refresh wins so one render has one transform writer.
@@ -9249,6 +9211,7 @@ function renderSessionListFromCache(){
   _playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);
 
   function _renderOneSession(s, isPinnedGroup=false){
+    const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
     const isStreaming=ownStreaming||!!s._child_session_streaming;
@@ -9256,24 +9219,6 @@ function renderSessionListFromCache(){
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
-    // Expanded descendants have their own dynamic unread/report state and
-    // handlers. Keep their existing render path; collapsed rows are reusable.
-    const cacheKey=_sidebarLineageKeyForRow(s);
-    const canReuse=!animateRefresh&&!(isActive&&S.session&&S.session._flash)
-      &&!_expandedLineageKeys.has(cacheKey)&&!_expandedChildSessionKeys.has(cacheKey)
-      &&!searchQueryRaw&&!_sessionSwipeReturnOffsets.has(s.session_id);
-    let rowSig=null;
-    if(canReuse){
-      try{ rowSig=JSON.stringify([s,rowContext,isPinnedGroup,isActive,ownStreaming,hasUnread,attention]); }
-      catch(_){ /* Unserializable client metadata must render, never block paint. */ }
-    }
-    const cached=previousRowCache.get(s.session_id);
-    if(rowSig&&cached&&cached.sig===rowSig
-      &&!cached.el.matches('.dragging,.long-pressing,.swipe-committed,.swipe-removing,.session-swipe-returning,.session-list-flip-enter')){
-      nextRowCache.set(s.session_id,cached);
-      return cached.el;
-    }
-    const el=document.createElement('div');
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
@@ -10225,25 +10170,7 @@ function renderSessionListFromCache(){
       if(!touch) return;
       if(_finishSessionGesture(touch.clientX,touch.clientY,e.target,'touch')) e.stopPropagation();
     },{passive:true});
-    if(rowSig) nextRowCache.set(s.session_id,{sig:rowSig,el});
     return el;
-  }
-  }finally{
-    if(typeof _sidebarUnreadBaselineBatch!=='undefined') _sidebarUnreadBaselineBatch=previousBaselineBatch;
-    if(!previousBaselineBatch&&baselineBatch.dirty){
-      // Each clear was already written at its original per-session intent.
-      // Retain the quota/pruning and cross-tab max/clear-wins merges, once per
-      // paint instead of once per previously-unseen visible row.
-      _writeSessionCompletionUnreadCleared([],0);
-      // If quota rejected an immediate clear, pruning may have made room.
-      // Retry the exact captured order, never a later logical clear.
-      for(const [sid,order] of baselineBatch.clears) _writeSessionCompletionUnreadCleared(sid,order,true);
-      _writeSessionCompletionUnreadCleared([],0);
-      _saveSessionViewedCounts();
-      const before=JSON.stringify(_getSessionCompletionUnread());
-      _saveSessionCompletionUnread();
-      if(JSON.stringify(_getSessionCompletionUnread())!==before) renderSessionListFromCache();
-    }
   }
 }
 

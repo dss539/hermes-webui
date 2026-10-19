@@ -11562,7 +11562,6 @@ def _session_attention_summary(session_id: str) -> dict | None:
 _SIDEBAR_SESSION_RESPONSE_FIELDS = (
     _route_session_list_cache._SIDEBAR_SESSION_RESPONSE_FIELDS
 )
-_SIDEBAR_SESSION_RESPONSE_FIELD_ORDER = tuple(sorted(_SIDEBAR_SESSION_RESPONSE_FIELDS))
 
 
 def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None = None) -> dict:
@@ -11574,12 +11573,10 @@ def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None
     installs should not ship tens of KB of per-row detail just to render a
     conversation title.
     """
-    # Keep cold-builder and bounded-cache responses in the same property order.
-    # The browser's no-op signature must not change on the first cache hit.
     item = {
-        key: session[key]
-        for key in _SIDEBAR_SESSION_RESPONSE_FIELD_ORDER
-        if key in session
+        key: value
+        for key, value in dict(session).items()
+        if key in _SIDEBAR_SESSION_RESPONSE_FIELDS
     }
     if isinstance(item.get("title"), str):
         item["title"] = _redact_text(item["title"], _enabled=redact_enabled)

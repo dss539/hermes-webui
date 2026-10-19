@@ -190,18 +190,6 @@ a closed drawer (#8044). Run it locally with
 `python tests/browser_project_picker_keyboard.py`; add `--screenshots DIR` to
 write the open picker at 390x844, 820x1180, 844x390 and 1440x900.
 
-It also runs `tests/browser_sidebar_incremental.py`, using 351 synthetic
-client-side rows in an agent-free WebUI. A changed row must repaint while
-unrelated visible rows keep their DOM identity; the virtual-window cache must
-stay bounded. The gate checks active/streaming/unread/approval indicators,
-project/source/search filters, pinned/date groups, all-profile detail labels,
-children/forks, menu and rename-input stability, no-op payload adoption, and
-immediate durable clear ordering during batched first-seen unread baselines.
-Run `python tests/browser_sidebar_incremental.py` locally; `--screenshots DIR`
-writes the tablet review image. This correctness gate is not a timing claim:
-production-sized HTTP/CPU-throttled performance comparisons belong in the
-separate reproducible benchmark report.
-
 Finally it runs `tests/browser_image_lightbox_zoom.py` in Chromium, the image
 viewer zoom gate. On desktop (1440x900) and phone (390x844 touch) it opens a
 chat image in the lightbox and checks:

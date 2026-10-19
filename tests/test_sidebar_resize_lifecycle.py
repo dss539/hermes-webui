@@ -72,11 +72,10 @@ def _extract_group_loop() -> str:
     from its start marker to the virtualization anchor restore that follows
     it in production."""
     start_marker = "let globalSessionRowIndex=0;"
+    end_marker = "if(virtualAnchorScrollTop!==null){"
     start = SESSIONS_JS.index(start_marker)
-    # Only extract the group loop, not the archive controls and final mount
-    # that follow it. Mount its off-document content in the harness below.
-    loop = _extract_braced(SESSIONS_JS[start:], "for(const g of groups){")
-    return start_marker + "\n" + loop
+    end = SESSIONS_JS.index(end_marker, start)
+    return SESSIONS_JS[start:end]
 
 
 HARNESS_HTML = """<!DOCTYPE html>
@@ -138,7 +137,6 @@ window.__renderGroups = (labels, rowsPerGroup) => {
 // real loop again.
 window.__buildGroups = () => {
   const list = document.getElementById('sessionList');
-  const content = document.createDocumentFragment();
   list.innerHTML = '';
   const groups = window.__groups || [];
   const virtualWindow = {virtualized:false, start:0, end:1000000, itemHeight:24};
@@ -156,7 +154,6 @@ window.__buildGroups = () => {
   };
 __COLLAPSE_STATE__
 __GROUP_LOOP__
-  if(content.childNodes.length) list.replaceChildren(content);
 };
 window.renderSessionListFromCache = window.__buildGroups;
 window.__seedGroupsFixture = () => {
