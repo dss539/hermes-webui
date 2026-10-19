@@ -200,8 +200,7 @@ def main():
         env={k:v for k,v in os.environ.items() if not k.endswith('_API_KEY') and not k.startswith('HERMES_WEBUI_TLS_')}
         env.update(HERMES_HOME=str(root/'hermes'),HERMES_BASE_HOME=str(root/'hermes'),
                    HERMES_WEBUI_STATE_DIR=str(state),HERMES_WEBUI_HOST='127.0.0.1',HERMES_WEBUI_PORT=str(port),
-                   HERMES_WEBUI_SKIP_ONBOARDING='1',HERMES_WEBUI_AGENT_DIR=env.get('HERMES_WEBUI_AGENT_DIR',str(root/'no-agent')),
-                   HERMES_DISABLE_LAZY_INSTALLS='1',
+                   HERMES_WEBUI_SKIP_ONBOARDING='1',HERMES_WEBUI_AGENT_DIR=str(root/'no-agent'),
                    HERMES_WEBUI_NO_DOTENV='1',HERMES_WEBUI_PRESERVE_ENV='1',HERMES_WEBUI_ISOLATED_PROFILE='1')
         with (root/'server.log').open('w') as log:
             server=subprocess.Popen([sys.executable,str(repo/'server.py')],cwd=repo,env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -211,7 +210,7 @@ def main():
                         with urllib.request.urlopen(f'http://127.0.0.1:{port}/health',timeout=1) as response:
                             if response.status==200:break
                     except Exception:pass
-                    if server.poll() is not None:raise RuntimeError('test server exited:\n'+(root/'server.log').read_text())
+                    if server.poll() is not None:raise RuntimeError('test server exited')
                     time.sleep(.2)
                 else:raise RuntimeError('test server health timed out')
                 with sync_playwright() as pw:
