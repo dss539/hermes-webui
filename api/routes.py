@@ -2943,11 +2943,7 @@ def _get_cached_session_list_payload(
                 pass
         return latest
 
-    # The all-profile WebUI sidebar must not reuse rows whose source revision
-    # changed. Preserve bounded stale fallback for the other legacy consumers;
-    # this scope instead takes the existing independent-rebuild safety path.
-    current_sidebar = len(key) > 11 and key[1] and key[6] and key[11] == "webui"
-    if stale is not None and not (current_sidebar and stale_reason == "source"):
+    if stale is not None:
         if diag is not None:
             try:
                 diag.stage("session_list_cache_wait_stale_fallback")
