@@ -90,11 +90,7 @@ def test_content_fingerprint_safe_on_missing_or_empty_db():
     conn.execute("CREATE TABLE unrelated(x)")
     conn.commit()
     conn.close()
-    # Empty/old databases still have a stable opaque commit revision. No table
-    # query or MAX(rowid) sentinel is needed; a later DDL/DML commit invalidates it.
+    # No sessions/messages tables → None parts (MAX(rowid) on a missing table),
+    # no exception. Shape is a 2-tuple of (sessions_max_rowid, messages_max_rowid).
     fp = _sqlite_content_fingerprint(p)
-    assert isinstance(fp, tuple) and len(fp) == 2
-    assert fp == _sqlite_content_fingerprint(p)
-    with sqlite3.connect(p) as writer:
-        writer.execute('INSERT INTO unrelated VALUES (1)')
-    assert fp != _sqlite_content_fingerprint(p)
+    assert fp == (None, None)

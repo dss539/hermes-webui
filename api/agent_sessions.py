@@ -775,8 +775,8 @@ def read_importable_agent_session_rows(
         return _result([])
 
     log = log or logger
-    from api.agent_session_summaries import summary_connection
-    with summary_connection(db_path) as conn:
+    conn = open_state_db_readonly(db_path, log=log)
+    with closing(conn):
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
@@ -1010,23 +1010,6 @@ def read_importable_agent_session_rows(
             # that tie order when the GROUP BY is no longer necessary.
             order_by_clause = "ORDER BY COALESCE(last_activity, s.started_at) DESC, s.id"
 
-        if getattr(conn, 'sidebar_summary', False) and use_messages_join:
-            # The exact aggregate reconciliation is shared by every SQL consumer.
-            # Keep candidate SQL, query-local windows and its existing tie order.
-            actual_count_expr = "COALESCE((SELECT actual_message_count FROM _sidebar_message_stats ms WHERE ms.session_id=s.id),0)"
-            user_message_count_expr = "COALESCE((SELECT actual_user_message_count FROM _sidebar_message_stats ms WHERE ms.session_id=s.id),0)"
-            last_activity_expr = "(SELECT last_activity FROM _sidebar_message_stats ms WHERE ms.session_id=s.id)"
-            join_clause = ""
-            group_by_clause = ""
-            order_by_clause = "ORDER BY COALESCE(last_activity,s.started_at) DESC,s.id"
-            if messages_index_present:
-                candidate_order_clause = "ORDER BY COALESCE((SELECT last_activity FROM _sidebar_message_stats ms WHERE ms.session_id=s.id),s.started_at) DESC,s.started_at DESC"
-                latest_messages_cte = None
-            else:
-                # Keep the unindexed candidate's materialized LEFT JOIN shape,
-                # including its stable scan order when every sort key ties.
-                latest_messages_cte = "latest_messages AS (SELECT session_id,MAX(last_activity) AS last_message_at FROM _sidebar_message_stats GROUP BY session_id)"
-
         select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
@@ -1051,9 +1034,14 @@ def read_importable_agent_session_rows(
         """
 
         def _project(raw_rows: list[dict]) -> list[dict]:
-            from api.agent_session_summaries import project_rows
-            return project_rows(conn, raw_rows, _project_agent_session_rows,
-                                _with_normalized_source, is_cli_session_row_visible)
+            projected = _project_agent_session_rows(raw_rows)
+            # model_config is selected only so the continuation classifier can
+            # read the real _branched_from/_delegate_from markers; it is internal
+            # agent state and must not leak into the /api/sessions response.
+            for row in projected:
+                row.pop('model_config', None)
+            projected = [_with_normalized_source(row) for row in projected]
+            return [row for row in projected if is_cli_session_row_visible(row)]
 
         if limit is not None:
             result_limit = max(0, int(limit))
@@ -1431,8 +1419,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         return {}
 
     try:
-        from api.agent_session_summaries import summary_connection
-        with summary_connection(db_path) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -1544,13 +1531,15 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                 for i in range(0, len(row_ids), IN_CHUNK):
                     chunk = row_ids[i:i + IN_CHUNK]
                     placeholders = ','.join('?' * len(chunk))
-                    stats_sql = f"""
+                    cur.execute(
+                        f"""
                         SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
-                        FROM messages WHERE session_id IN ({placeholders}) GROUP BY session_id
-                    """
-                    if getattr(conn, 'sidebar_summary', False):
-                        stats_sql = f"SELECT session_id,actual_message_count,last_activity AS last_message_at FROM _sidebar_message_stats WHERE session_id IN ({placeholders})"
-                    cur.execute(stats_sql, chunk)
+                        FROM messages
+                        WHERE session_id IN ({placeholders})
+                        GROUP BY session_id
+                        """,
+                        chunk,
+                    )
                     for row in cur.fetchall():
                         message_stats[row['session_id']] = dict(row)
             for sid, row in rows.items():

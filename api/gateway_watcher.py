@@ -82,16 +82,6 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
     schema so the caller falls back to running the expensive projection rather
     than risk skipping a change.
     """
-    from api.agent_session_summaries import source_revision
-    try:
-        revision = source_revision(db_path)
-        if revision is not None:
-            return repr(revision)
-    except Exception:
-        pass  # Unknown/unavailable schemas retain the exact legacy/parity path.
-
-    # Legacy fallback only. Supported readers share exact raw summary facts,
-    # including role changes; no second watcher aggregate or row hash is needed.
     # Columns the projection reads from the ``sessions`` table. ``id``/``source``
     # are always present (``source`` is required for the projection to run at
     # all); the rest are optional on older agent schemas and filtered below.

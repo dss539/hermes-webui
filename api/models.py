@@ -492,8 +492,6 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.flush()
                     os.fsync(f.fileno())
                 _safe_replace(_tmp, session_index_file)
-                from api.session_summary_index import publish_index
-                publish_index(session_index_file, entries)
             except Exception:
                 # Best-effort cleanup of stale tmp on failure
                 try:
@@ -541,8 +539,6 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     f.flush()
                     os.fsync(f.fileno())
                 _safe_replace(_tmp, session_index_file)
-                from api.session_summary_index import publish_index
-                publish_index(session_index_file, existing)
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
@@ -1953,8 +1949,6 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-                published_stat = os.fstat(f.fileno())
-                published_identity = (published_stat.st_dev, published_stat.st_ino)
             if skip_index:
                 # Callers that explicitly skip the sidebar projection retain
                 # the existing same-session concurrency contract: their unique
@@ -1986,19 +1980,6 @@ class Session:
             except Exception:
                 pass
             raise
-
-        # Derivative maintenance cannot undo a successful canonical save. Keep
-        # guarded full-save facts distinct from metadata-only/index semantics.
-        try:
-            from api.session_summary_index import publish_saved
-            saved_summary = copy.copy(self)
-            saved_summary.__dict__.update(meta)
-            saved_summary.__dict__.update(extra)
-            saved_summary.messages = guarded_messages
-            saved_summary._metadata_message_count = len(guarded_messages)
-            publish_saved(self.path, saved_summary.compact(sidebar_metadata_only=True), published_identity)
-        except Exception:
-            logger.debug("Saved sidebar summary unavailable; JSON remains canonical", exc_info=True)
 
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
@@ -7129,7 +7110,6 @@ def _refresh_index_rows_from_sidecar_metadata(
     sessions: list[dict],
     *,
     index_message_counts: dict[str, int] | None = None,
-    sidebar_metadata_only: bool = False,
 ) -> list[dict]:
     """Overlay fuller sidecar metadata onto stale sidebar index rows.
 
@@ -7151,32 +7131,14 @@ def _refresh_index_rows_from_sidecar_metadata(
         if not sid:
             out.append(session)
             continue
-        from api.session_summary_index import metadata_compact
-        def load_compact():
-            sidecar = Session.load_metadata_only(sid, index_message_counts=index_message_counts)
-            if not sidecar:
-                return None
-            compact = sidecar.compact(include_runtime=True)
-            if not sidebar_metadata_only:
-                return compact
-            # Only fields consumed below; no routing/context/draft/transcript.
-            image = {key: compact[key] for key in (
-                'message_count', 'updated_at', 'last_message_at', 'title', 'workspace',
-                'model', 'model_provider', 'created_at', 'pinned', 'archived', 'project_id',
-                'profile', 'pre_compression_snapshot', 'parent_session_id', 'source_tag',
-                'raw_source', 'session_source', 'source_label', 'active_stream_id',
-                'has_pending_user_message', 'pending_started_at',
-            ) if key in compact}
-            image['pending_user_message'] = bool(compact.get('pending_user_message'))
-            return image
-        compact = metadata_compact(
-            SESSION_DIR / f'{sid}.json',
-            index_message_counts.get(str(sid)) if index_message_counts is not None else None,
-            load_compact,
-        ) if sidebar_metadata_only else load_compact()
-        if compact is None:
+        sidecar = Session.load_metadata_only(
+            sid,
+            index_message_counts=index_message_counts,
+        )
+        if not sidecar:
             out.append(session)
             continue
+        compact = sidecar.compact(include_runtime=True)
         refreshed = dict(session)
         for key in (
             'message_count', 'updated_at', 'last_message_at', 'title', 'workspace',
@@ -7598,8 +7560,7 @@ def _read_state_db_sidebar_overrides(
     chunk_size = 500
     overrides: dict[str, dict] = {}
     try:
-        from api.agent_session_summaries import summary_connection
-        with summary_connection(db_path) as conn:
+        with closing(open_state_db_readonly(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
@@ -7668,13 +7629,15 @@ def _read_state_db_sidebar_overrides(
                         continue
                     count_placeholders = ','.join('?' * len(count_chunk))
                     last_at_expr = "MAX(timestamp) AS last_message_at" if messages_has_timestamp else "NULL AS last_message_at"
-                    stats_sql = f"""
+                    cur.execute(
+                        f"""
                         SELECT session_id, COUNT(*) AS actual_message_count, {last_at_expr}
-                        FROM messages WHERE session_id IN ({count_placeholders}) GROUP BY session_id
-                    """
-                    if getattr(conn, 'sidebar_summary', False):
-                        stats_sql = f"SELECT session_id,actual_message_count,last_activity AS last_message_at FROM _sidebar_message_stats WHERE session_id IN ({count_placeholders})"
-                    cur.execute(stats_sql, count_chunk)
+                        FROM messages
+                        WHERE session_id IN ({count_placeholders})
+                        GROUP BY session_id
+                        """,
+                        count_chunk,
+                    )
                     for row in cur.fetchall():
                         sid = str(row['session_id'])
                         entry = overrides.setdefault(sid, {})
@@ -7696,10 +7659,7 @@ def _read_state_db_sidebar_overrides(
                 for i in range(0, len(delegated_title_ids), chunk_size):
                     chunk = delegated_title_ids[i:i + chunk_size]
                     placeholders = ','.join('?' * len(chunk))
-                    title_conn = getattr(conn, 'sidebar_source', conn)
-                    title_conn.row_factory = sqlite3.Row
-                    title_cur = title_conn.cursor()
-                    title_cur.execute(
+                    cur.execute(
                         f"""
                         SELECT session_id, role, content, timestamp
                         FROM messages
@@ -7708,7 +7668,7 @@ def _read_state_db_sidebar_overrides(
                         """,
                         chunk,
                     )
-                    for row in title_cur.fetchall():
+                    for row in cur.fetchall():
                         sid = str(row['session_id'])
                         if sid in seen_user_messages:
                             continue
@@ -7940,8 +7900,7 @@ def all_sessions(
     if SESSION_INDEX_FILE.exists():
         try:
             _diag_stage(diag, "all_sessions.read_index")
-            from api.session_summary_index import read_index
-            index = read_index(SESSION_INDEX_FILE) if sidebar_metadata_only else json.loads(SESSION_INDEX_FILE.read_bytes())
+            index = json.loads(SESSION_INDEX_FILE.read_bytes())
             _diag_stage(diag, "all_sessions.prune_index")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
@@ -8039,7 +7998,6 @@ def all_sessions(
             refreshed_index_rows = _refresh_index_rows_from_sidecar_metadata(
                 list(index_map.values()),
                 index_message_counts=index_message_counts,
-                sidebar_metadata_only=sidebar_metadata_only,
             )
             index_map = {
                 row['session_id']: row
@@ -9113,13 +9071,72 @@ def _callable_accepts_keyword(callable_obj, keyword: str) -> bool:
 
 
 def _sqlite_content_fingerprint(db_path: Path):
-    """Observe commits on a persistent read-only connection, including edits/deletes.
+    """Return a commit-reliable content fingerprint for a state.db.
 
-    A fresh connection's data_version and MAX(rowid) are not commit revisions.
-    The shared observer is bounded and never executes Agent PRAGMA writes.
+    The stat-only key below (mtime_ns + size of the .db/-wal/-shm files) is NOT
+    reliable for cache invalidation: in WAL mode a commit lands in the -wal file,
+    and under fast sequential writes the (mtime_ns, size) of the sidecars can
+    COLLIDE with a previously cached stamp (same nanosecond bucket + a WAL frame
+    that lands at the same offset/size after a prior checkpoint truncation), so a
+    freshly-committed gateway/CLI session is intermittently served from the stale
+    Python cache. PRAGMA data_version does NOT help here either — read from a
+    fresh per-request connection it always reports that connection's own initial
+    value and never advances (verified). A cheap content fingerprint over the
+    sessions/messages tables, read on a fresh connection, DOES advance on every
+    commit (incl. external gateway writes) and is immune to mtime granularity.
+    Cost is a pair of indexed COUNT/MAX queries (sub-ms), far cheaper than the
+    full uncached session scan this key gates.
     """
-    from api.sidebar_revision import sqlite_revision
-    return sqlite_revision(db_path)
+    try:
+        if not Path(db_path).exists():
+            return None
+    except OSError:
+        return None
+    try:
+        import sqlite3
+        # Read-only + a tiny busy timeout: a fingerprint read must NEVER stall the
+        # /api/sessions hot path when state.db is briefly locked by a writer.
+        # On lock (or any error) we return None and the caller falls back to the
+        # cheap file-stat stamp, so correctness degrades gracefully to the prior
+        # behavior rather than blocking for the default multi-second busy timeout.
+        try:
+            conn = sqlite3.connect(
+                f"file:{db_path}?mode=ro", uri=True, timeout=0.05
+            )
+        except Exception:
+            return None
+        try:
+            conn.execute("PRAGMA busy_timeout=50")
+            parts = []
+            for table in ("sessions", "messages"):
+                try:
+                    # MAX(rowid) is an O(1) index lookup (no table scan) and
+                    # advances on every INSERT. Pair it with the table's largest
+                    # rowid + a count-free total: we deliberately avoid COUNT(*)
+                    # which forces a full SCAN on large messages tables (~tens of
+                    # ms per sidebar refresh on a big store). MAX(rowid) misses a
+                    # pure DELETE-without-insert, but the file-stat fallback in
+                    # _sqlite_file_stat_cache_key still moves on a delete commit,
+                    # and a delete never makes a MISSING row appear (the flake we
+                    # fix is an ADDED row not showing up). It also misses a plain
+                    # `UPDATE sessions SET title/message_count` with no message
+                    # insert (state_sync.py sync) — those fall back to the stat
+                    # stamp + 5s TTL, i.e. the prior behavior (a title-only rename
+                    # can lag <=5s); no regression vs the old stat-only key.
+                    row = conn.execute(
+                        f"SELECT MAX(rowid) FROM {table}"
+                    ).fetchone()
+                    parts.append(row[0] if row else None)
+                except Exception:
+                    parts.append(None)
+            return tuple(parts)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return None
 
 
 def _sqlite_file_stat_cache_key(db_path: Path):
