@@ -2824,17 +2824,6 @@ def _get_cached_session_list_payload(
                 pass
         return cached
 
-    # Provision system chips before capturing the authoritative build's source
-    # stamp. No source component is ignored or restamped after the build.
-    if len(key) > 11 and key[1] and key[2] and key[6] and key[11] == 'webui':
-        from api.models import prepare_sidebar_system_projects
-        try:
-            prepare_sidebar_system_projects(all_profiles=True, source_filter=key[10])
-        except Exception:
-            # Optional normalization must retain the builder's existing corrupt
-            # or unavailable-source recovery rather than fail the whole route.
-            logger.debug('Sidebar normalization preflight failed', exc_info=True)
-
     stale = cached  # now actually a stale payload when one exists, else None
     stale_reason = _session_list_cache_stale_reason(key) if stale is not None else None
     if stale is not None and stale_reason != "source":
@@ -15118,8 +15107,7 @@ def handle_get(handler, parsed) -> bool:
                 diag=diag,
             )
             diag.stage("response_write")
-            from api.sidebar_response import send_session_list
-            return send_session_list(handler, _session_list_payload_to_response(payload), key)
+            return j(handler, _session_list_payload_to_response(payload), pretty=False)
         finally:
             diag.finish()
 

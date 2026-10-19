@@ -72,19 +72,6 @@ def _extract_function(source_text: str, function_name: str) -> str:
 
 
 def _run_node(script: str):
-    script = """
-global.S={activeProfile:'default'};
-global._sidebarSessionValidator=null;
-global._sidebarReceivedValidator=null;
-global._sidebarRequestSequence=0;
-global._sidebarSessionScopeKey=qs=>JSON.stringify(['default',qs]);
-global._restoreSidebarBootCache=()=>{};
-""" + script
-    # The API metadata option wraps successful session JSON, while project JSON
-    # keeps the original contract. Preserve all concurrency/retry assertions.
-    script = script.replace("global.api = (url", "global._testApi = (url")
-    marker = "async function _loadSidebarSessionListPayload"
-    script = script.replace(marker, "global.api=async(url,opts)=>{const data=await global._testApi(url,opts);return opts&&opts.responseMeta?{data,etag:null,unchanged:false}:data;};\n" + marker)
     completed = subprocess.run(
         [NODE, "-e", script],
         cwd=ROOT,
@@ -333,7 +320,7 @@ global.api = (url, opts) => {{
 
     body = _run_node(script)
     assert body["orderAtSettleBoundary"] == ["projects", "sessions"]
-    assert body["sessionOpts"] == {"timeoutToast": False, "responseMeta": True, "cache": "no-store", "headers": {"Content-Type": "application/json"}}
+    assert body["sessionOpts"] == {"timeoutToast": False}
     assert body["projectOpts"] == {"timeoutToast": False}
     assert body["payload"]["sessData"]["sessions"] == [{"session_id": "warm-1"}]
     assert body["payload"]["projData"]["projects"] == [{"name": "demo"}]

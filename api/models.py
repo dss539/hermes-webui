@@ -9295,47 +9295,6 @@ def _all_profiles_cli_contexts() -> tuple[list[tuple[Path, Path, str | None]], t
     return contexts, tuple(cache_entries)
 
 
-def prepare_sidebar_system_projects(*, all_profiles: bool = False, source_filter=None) -> None:
-    """Run known project normalization before the list's source fence starts.
-
-    Probe through the same read-only visibility/lineage projection. Only a row
-    the real loader would process can provision a system project. External edits
-    during the following build still invalidate the ordinary source fence.
-    """
-    if source_filter not in (None, 'cron', 'webhook'):
-        return
-    if all_profiles:
-        contexts, _ = _all_profiles_cli_contexts()
-    else:
-        home, db, profile, _ = _resolve_cli_sessions_context(include_claude_code=False)
-        contexts = [(home, db, profile)]
-    from api.profiles import _profiles_match
-    projects = load_projects()
-    for _home, db, profile in contexts:
-        if not db.exists():
-            continue
-        for source in ('cron', 'webhook'):
-            if source_filter not in (None, source):
-                continue
-            project_name = CRON_PROJECT_NAME if source == 'cron' else WEBHOOK_PROJECT_NAME
-            if any(p.get('name') == project_name and _profiles_match(p.get('profile'), profile)
-                   for p in projects):
-                continue
-            if source == 'cron' and not _profile_has_user_projects(profile):
-                continue
-            try:
-                rows = read_importable_agent_session_rows(
-                    db, limit=1, include_sources=(source,), exclude_sources=None,
-                )
-                if rows:
-                    if source == 'cron':
-                        ensure_cron_project(create=_profile_has_user_projects(profile), profile=profile)
-                    else:
-                        ensure_webhook_project(profile=profile)
-            except (OSError, sqlite3.Error):
-                logger.debug('System project preflight unavailable', exc_info=True)
-
-
 def clear_sidecar_metadata_cache() -> None:
     """Drop all memoized sidebar-projection sidecar metadata (test/lifecycle hook)."""
     with _SIDECAR_METADATA_CACHE_LOCK:

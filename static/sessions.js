@@ -1198,14 +1198,6 @@ function _hasUnreadForSession(s) {
   if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
   const generation = _sessionTranscriptGenerationForUnread(s.session_id, s.transcript_generation);
-  // Last-known rows may display existing unread facts, but cannot establish a
-  // new viewed baseline or advance a transcript generation before reconciliation.
-  if(typeof _sidebarShowingLastKnown!=='undefined' && _sidebarShowingLastKnown){
-    if(!Object.prototype.hasOwnProperty.call(counts,s.session_id)) return false;
-    const viewed=_sessionViewedCountRecord(counts[s.session_id]);
-    return generation===viewed.transcript_generation && Number.isFinite(s.message_count)
-      && s.message_count>viewed.message_count;
-  }
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
     if(typeof _sidebarUnreadBaselineBatch!=='undefined'&&_sidebarUnreadBaselineBatch){
       counts[s.session_id]=_sessionViewedCountRecord(Number(s.message_count||0),generation);
@@ -6455,7 +6447,6 @@ function _applySessionListPayload(sessData, projData, opts){
   // are rendered outside the signature path, so an identical-signature match
   // would leave the skeleton/error on screen instead of the real list. (Codex #5467)
   const _canRenderNow = !_renamingSid && !_sessionActionMenu;
-  _recordSidebarProjection(sessData);
   const _mustForceRender = _hadSessionListSkeleton || _hadSessionListLoadError;
   const _renderSig = _sessionListRenderSignature();
   if(_canRenderNow && !_mustForceRender && !_sessionListRefreshAnimationPending && _renderSig && _renderSig===_lastSessionListRenderSig){
@@ -6585,11 +6576,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
       sessionRequestOpts.timeoutMs=_SESSION_LIST_BOOT_TIMEOUT_MS;
       sessionRequestOpts.retryTimeouts=true;
     }
-    const payloadPromise=_loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
-    _restoreSidebarBootCache(sessionListQS);
-    const {sessData, projData, unchanged, serverTime}=await payloadPromise;
-    // Release parsing/startup work before adopting and painting the list.
-    await new Promise(resolve=>setTimeout(resolve,0));
+    const {sessData, projData}=await _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
     // #4671: while a profile switch is mid-flight, drop ANY payload — even one whose
@@ -6598,9 +6585,6 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // rows. The switch clears the embargo immediately before its own (authoritative)
     // renderSessionList(), so that render's payload is the first allowed to paint.
     if (_profileSwitchListEmbargo) return;
-    if(Number.isFinite(serverTime) && serverTime>0) _serverTimeDelta=Date.now()-serverTime*1000;
-    if(unchanged && !_sessionListLoadError && !_sessionListSkeletonActive
-      && JSON.stringify(projData.projects||[])===JSON.stringify(_allProjects||[])) return;
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
       _pendingSessionListPayload={gen:_gen,sessData,projData,unreadGen};
       _schedulePendingSessionListApply();
@@ -6647,85 +6631,6 @@ async function _runRenderSessionListRefresh(opts, _gen){
   }
 }
 
-let _sidebarSessionValidator = null;
-let _sidebarReceivedValidator = null;
-let _sidebarRequestSequence = 0;
-let _sidebarShowingLastKnown = false;
-const _SIDEBAR_BOOT_CACHE_KEY = 'hermes-webui-sidebar-last-known-v1';
-let _sidebarBootCacheAttempted = false;
-let _sidebarBootCacheSaveTimer = 0;
-
-function _recordSidebarProjection(sessData){
-  _sidebarShowingLastKnown=false;
-  _sidebarSessionValidator=sessData._sidebarValidator ? {...sessData._sidebarValidator,sessData} : null;
-  const list=$('sessionList');
-  if(list){list.dataset.freshness='current';list.removeAttribute('aria-busy');}
-  const note=$('sidebarCacheStatus');if(note) note.remove();
-  _saveSidebarBootCache(sessData);
-}
-
-function _sidebarSessionScopeKey(sessionListQS){
-  const url=new URL('api/sessions'+sessionListQS,document.baseURI||location.href).href;
-  return JSON.stringify([S.activeProfile||'default',url]);
-}
-
-function _restoreSidebarBootCache(sessionListQS){
-  if(_sidebarBootCacheAttempted || _sessionListHasLoadedOnce || _allSessions.length
-    || _profileSwitchListEmbargo || _sessionListSkeletonActive) return;
-  _sidebarBootCacheAttempted=true;
-  try{
-    const raw=sessionStorage.getItem(_SIDEBAR_BOOT_CACHE_KEY);
-    if(!raw || raw.length>1024*1024) return;
-    const entry=JSON.parse(raw);
-    if(entry.scope!==_sidebarSessionScopeKey(sessionListQS) || !Array.isArray(entry.sessions)
-      || !Array.isArray(entry.projects) || !Array.isArray(entry.references)) return;
-    _allSessions=entry.sessions;
-    _sidebarReferenceSessions=entry.references;
-    _allProjects=entry.projects;
-    _sidebarShowingLastKnown=true;
-    _otherProfileCount=Number(entry.otherProfileCount)||0;
-    _archivedWebuiCount=Number(entry.archivedWebuiCount)||0;
-    _archivedCliCount=Number(entry.archivedCliCount)||0;
-    _serverWebuiSessionCount=Number.isFinite(entry.webuiCount)?entry.webuiCount:null;
-    _serverCliSessionCount=Number.isFinite(entry.cliCount)?entry.cliCount:null;
-    // This is last-known data, never an authoritative successful load. Do not
-    // prime polling completion/attention state or send its persisted validator.
-    _allSessionsScope={profile:S.activeProfile||'default',allProfiles:!!_showAllProfiles,
-      sidebarSource:_requestedSessionSidebarSource(),excludeHidden:_sessionListExcludeHiddenEnabled()};
-    const list=$('sessionList');
-    if(list){
-      list.dataset.freshness='cached';
-      list.setAttribute('aria-busy','true');
-      const note=document.createElement('div');
-      note.id='sidebarCacheStatus';note.className='sidebar-cache-status';
-      note.setAttribute('role','status');note.textContent='Updating conversations…';
-      const head=document.querySelector('#panelChat .panel-head');
-      if(head) head.insertBefore(note,head.lastElementChild);
-    }
-    renderSessionListFromCache();
-  }catch(_){}
-}
-
-function _saveSidebarBootCache(sessData){
-  if(_sidebarBootCacheSaveTimer) clearTimeout(_sidebarBootCacheSaveTimer);
-  const scope=_sidebarSessionScopeKey(_sessionListQueryString());
-  _sidebarBootCacheSaveTimer=setTimeout(()=>{
-    _sidebarBootCacheSaveTimer=0;
-    if(scope!==_sidebarSessionScopeKey(_sessionListQueryString()) || !_sessionListHasLoadedOnce
-      || _profileSwitchListEmbargo || _sessionListSkeletonActive) return;
-    try{
-      // Persist bounded server metadata, not merged local optimism or prompt
-      // text. A reload must not turn a local in-flight row into server truth.
-      const sessions=(sessData.sessions||[]).map(s=>{const {pending_user_message,...row}=s;return row;});
-      const raw=JSON.stringify({scope,sessions,references:sessData.sidebar_reference_sessions||[],projects:_allProjects,
-        otherProfileCount:_otherProfileCount,archivedWebuiCount:_archivedWebuiCount,archivedCliCount:_archivedCliCount,
-        webuiCount:_serverWebuiSessionCount,cliCount:_serverCliSessionCount});
-      if(raw.length<=1024*1024) sessionStorage.setItem(_SIDEBAR_BOOT_CACHE_KEY,raw);
-      else sessionStorage.removeItem(_SIDEBAR_BOOT_CACHE_KEY);
-    }catch(_){}
-  },0);
-}
-
 async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts){
   const projectPromise = (async() => {
     try{
@@ -6737,34 +6642,10 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)
     }
   })();
 
-  const scope=_sidebarSessionScopeKey(sessionListQS);
-  const requestSequence=++_sidebarRequestSequence;
-  // A superseded response may be revalidated but never treated as already
-  // painted. This avoids downloading it again when an SSE snapshot queued a
-  // second request while the first was in flight, without losing newer edits.
-  const received=_sidebarReceivedValidator && _sidebarReceivedValidator.scope===scope
-    ? _sidebarReceivedValidator : null;
-  const applied=_sessionListHasLoadedOnce && _sidebarSessionValidator
-    && _sidebarSessionValidator.scope===scope ? _sidebarSessionValidator : null;
-  const validator=received||applied;
-  const response=await api('/api/sessions' + sessionListQS,{
-    ...sessionRequestOpts,responseMeta:true,cache:'no-store',
-    headers:{'Content-Type':'application/json',...(validator?{'If-None-Match':validator.etag}:{})},
-  });
+  const sessData = await api('/api/sessions' + sessionListQS,sessionRequestOpts);
   const projData = await projectPromise;
-  if(response.unchanged){
-    if(!validator) throw new Error('Sidebar validator without a received projection');
-    if(Number.isFinite(response.serverTime) && response.serverTime>0) validator.sessData.server_time=response.serverTime;
-    return {sessData:validator.sessData,projData,unchanged:!!(applied&&applied.etag===validator.etag),serverTime:response.serverTime};
-  }
-  const sessData=response.data;
-  if(response.etag && sessData && typeof sessData==='object'){
-    Object.defineProperty(sessData,'_sidebarValidator',{value:{scope,etag:response.etag},enumerable:false});
-    if(requestSequence===_sidebarRequestSequence){
-      _sidebarReceivedValidator={scope,etag:response.etag,sessData};
-    }
-  }
-  return {sessData,projData,unchanged:false};
+
+  return {sessData,projData};
 }
 
 async function _drainRenderSessionListQueue(initialRequest){
@@ -8916,8 +8797,8 @@ function renderSessionListFromCache(){
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
-  // interrupted streams. Last-known boot rows are not server confirmation.
-  if(!(typeof _sidebarShowingLastKnown!=='undefined' && _sidebarShowingLastKnown)) _purgeStaleInflightEntries();
+  // interrupted streams. (#2066)
+  _purgeStaleInflightEntries();
   const searchQueryRaw=($('sessionSearch').value||'').trim();
   const q=searchQueryRaw.toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
@@ -8969,7 +8850,6 @@ function renderSessionListFromCache(){
   const previousRowCache=typeof _sessionRowDomCache!=='undefined'?_sessionRowDomCache:new Map();
   const nextRowCache=new Map();
   const rowContext=JSON.stringify([
-    typeof _sidebarShowingLastKnown!=='undefined' && _sidebarShowingLastKnown,
     searchQueryRaw, !!_sessionSelectMode, [..._selectedSessions],
     window._sidebarDensity, !!_showAllProfiles, _allProjects,
     document.documentElement.lang, Math.floor(_serverNowMs()/60000),
@@ -9384,10 +9264,8 @@ function renderSessionListFromCache(){
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
     const isStreaming=ownStreaming||!!s._child_session_streaming;
-    if(!(typeof _sidebarShowingLastKnown!=='undefined' && _sidebarShowingLastKnown)){
-      _rememberRenderedStreamingState(s, ownStreaming);
-      _rememberRenderedSessionSnapshot(s);
-    }
+    _rememberRenderedStreamingState(s, ownStreaming);
+    _rememberRenderedSessionSnapshot(s);
     const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     // Expanded descendants have their own dynamic unread/report state and
