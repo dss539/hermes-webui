@@ -31,7 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, ExitStack
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -12091,6 +12091,9 @@ def _keep_latest_messaging_session_per_source(
 from api.models import (
     Session,
     get_session,
+    get_session_for_draft,
+    _draft_lifecycle_lock_for_session_id,
+    _remove_session_with_draft,
     get_session_profile_readonly,
     get_session_for_scan,
     find_compression_recovery_session,
@@ -18392,7 +18395,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
-        if _session_is_subagent_view_only(sid):
+        if _is_subagent_child_session_id(sid):
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
@@ -18411,10 +18414,16 @@ def handle_post(handler, parsed) -> bool:
         if isinstance(files, list) and len(files) > _MAX_DRAFT_FILES:
             files = files[:_MAX_DRAFT_FILES]
         try:
-            s = get_session(sid)
+            s = get_session_for_draft(sid, allow_missing_cached=True)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if str(getattr(s, 'source_tag', '') or getattr(s, 'raw_source', '')
+               or getattr(s, 'session_source', '') or '').strip().lower() == 'subagent':
+            return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         _draft_mark("after_get_session")
+        # Ordinary saves own only the small draft lifecycle. Snapshot authority
+        # and first-shell publication retain transcript-before-draft ordering.
+        needs_agent_lock = bool(getattr(s, 'pre_compression_snapshot', False)) or not (SESSION_DIR / f'{sid}.json').exists()
         unchanged = False
         request_sid = sid
         request_session = s
@@ -18437,7 +18446,10 @@ def handle_post(handler, parsed) -> bool:
             )
 
         for _hop in range(_MAX_DRAFT_AUTHORITY_HOPS):
-            with _get_session_agent_lock(authoritative_sid):
+            with ExitStack() as draft_locks:
+                if needs_agent_lock:
+                    draft_locks.enter_context(_get_session_agent_lock(authoritative_sid))
+                draft_locks.enter_context(_draft_lifecycle_lock_for_session_id(authoritative_sid))
                 _draft_mark("acquired_lock")
                 # A successful parent check releases that lock before this hop
                 # acquires the child lock. Revalidate every traversed edge here
@@ -18447,7 +18459,7 @@ def handle_post(handler, parsed) -> bool:
                 ):
                     return _draft_authority_unconfirmed()
                 try:
-                    request_session = get_session(authoritative_sid)
+                    request_session = get_session_for_draft(authoritative_sid)
                 except KeyError:
                     return j(
                         handler,
@@ -18474,6 +18486,11 @@ def handle_post(handler, parsed) -> bool:
 
                 continuation_sid = None
                 if getattr(request_session, "pre_compression_snapshot", False):
+                    if not needs_agent_lock:
+                        # Rotation became durable after preflight. Release the
+                        # draft lock before taking the transcript authority lock.
+                        needs_agent_lock = True
+                        continue
                     continuation_session, continuation_sid = (
                         _draft_pre_compression_continuation_session_authority(
                             request_session,
@@ -18508,6 +18525,9 @@ def handle_post(handler, parsed) -> bool:
                         status=409,
                     )
 
+                if str(getattr(request_session, 'source_tag', '') or getattr(request_session, 'raw_source', '')
+                       or getattr(request_session, 'session_source', '') or '').strip().lower() == 'subagent':
+                    return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
                 current_draft = dict(getattr(request_session, "composer_draft", {}) or {})
                 next_draft = dict(current_draft)
                 if text is not None:
@@ -18557,6 +18577,7 @@ def handle_post(handler, parsed) -> bool:
                                     touch_updated_at=False,
                                     skip_index=True,
                                 )
+                                request_session._draft_identity_persisted = True
                     # Draft persistence is not conversation activity. Touching updated_at
                     # here makes the active-session external-refresh poll force-reload the
                     # current chat every few seconds while the user is typing, and that
@@ -18568,8 +18589,9 @@ def handle_post(handler, parsed) -> bool:
                     _draft_mark("before_save")
                     _save_session_draft(authoritative_sid, next_draft)
                     _draft_mark("after_save")
-                    request_session.composer_draft = next_draft
-                    saved_draft = request_session.composer_draft
+                    # Never assign back to a cached object that compression may
+                    # have rebound while this fixed-identity write was in flight.
+                    saved_draft = next_draft
                 sid = authoritative_sid
                 resolved_once = True
                 break
@@ -18784,19 +18806,20 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to close workspace terminal for deleted session %s", sid)
             sidecar_deleted = False
-            with LOCK:
-                SESSIONS.pop(sid, None)
+            with _draft_lifecycle_lock_for_session_id(sid):
+                with LOCK:
+                    SESSIONS.pop(sid, None)
+                    try:
+                        p.unlink(missing_ok=True)
+                    except Exception:
+                        logger.debug("Failed to unlink session file %s", p)
+                sidecar_deleted = not p.exists()
                 try:
-                    p.unlink(missing_ok=True)
+                    draft_deleted = bool(_delete_session_draft(sid))
                 except Exception:
-                    logger.debug("Failed to unlink session file %s", p)
-            sidecar_deleted = not p.exists()
-            try:
-                draft_deleted = bool(_delete_session_draft(sid))
-            except Exception:
-                logger.debug("Failed to delete draft sidecar for session %s", sid, exc_info=True)
-                draft_deleted = False
-            draft_delete_failed = not draft_deleted
+                    logger.debug("Failed to delete draft sidecar for session %s", sid, exc_info=True)
+                    draft_deleted = False
+                draft_delete_failed = not draft_deleted
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -21130,6 +21153,7 @@ def _handle_session_export(handler, parsed):
     # ``redact_session_data`` path so export context_messages uses the same
     # alias-stripping boundary as the visible transcript.
     snapshot = dict(s.__dict__)
+    snapshot['composer_draft'] = getattr(s, 'composer_draft', None) or {}
     if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
         state_messages = get_state_db_session_messages(
             sid, profile=getattr(s, "profile", None), include_row_identity=True,
@@ -25684,6 +25708,7 @@ def _handle_memory_read(handler, parsed=None):
 
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
+    skipped = 0
     phase1_removed_ids = set()
     draft_delete_failed = False
 
@@ -25693,32 +25718,34 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
             continue
         try:
             session_lock = _get_session_agent_lock(p.stem)
-            if not session_lock.acquire(timeout=5):
+            if not session_lock.acquire(timeout=0.1):
+                skipped += 1
                 logger.debug("Session %s is busy; leaving it for later cleanup", p.stem)
                 continue
             try:
-                s = Session.load(p.stem)
-                if zero_only:
-                    should_delete = s and len(s.messages) == 0
-                else:
-                    should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-                if should_delete:
-                    with LOCK:
-                        SESSIONS.pop(p.stem, None)
-                        p.unlink(missing_ok=True)
-                    session_deleted = not p.exists()
-                    if session_deleted:
-                        phase1_removed_ids.add(p.stem)
-                    try:
-                        draft_deleted = bool(_delete_session_draft(p.stem))
-                    except Exception:
-                        logger.debug("Failed to delete draft sidecar during cleanup for %s", p.stem, exc_info=True)
-                        draft_delete_failed = True
-                        draft_deleted = False
-                    if not draft_deleted:
-                        draft_delete_failed = True
-                    if session_deleted:
-                        cleaned += 1
+                with _draft_lifecycle_lock_for_session_id(p.stem):
+                    s = Session.load(p.stem)
+                    if zero_only:
+                        should_delete = s and len(s.messages) == 0
+                    else:
+                        should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                    if should_delete:
+                        with LOCK:
+                            SESSIONS.pop(p.stem, None)
+                            p.unlink(missing_ok=True)
+                        session_deleted = not p.exists()
+                        if session_deleted:
+                            phase1_removed_ids.add(p.stem)
+                        try:
+                            draft_deleted = bool(_delete_session_draft(p.stem))
+                        except Exception:
+                            logger.debug("Failed to delete draft sidecar during cleanup for %s", p.stem, exc_info=True)
+                            draft_delete_failed = True
+                            draft_deleted = False
+                        if not draft_deleted:
+                            draft_delete_failed = True
+                        if session_deleted:
+                            cleaned += 1
             finally:
                 session_lock.release()
         except Exception:
@@ -25735,7 +25762,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 continue
             try:
                 session_lock = _get_session_agent_lock(sid)
-                acquired = session_lock.acquire(timeout=5)
+                acquired = session_lock.acquire(timeout=0.1)
             except Exception:
                 logger.debug("Failed to acquire session lock during draft cleanup for %s", sid, exc_info=True)
                 draft_delete_failed = True
@@ -25840,11 +25867,12 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 "ok": False,
                 "error": "Failed to delete one or more session drafts",
                 "cleaned": cleaned,
+                "skipped": skipped,
                 "draft_delete_failed": True,
             },
             status=500,
         )
-    return j(handler, {"ok": True, "cleaned": cleaned})
+    return j(handler, {"ok": True, "cleaned": cleaned, "skipped": skipped})
 
 
 def _handle_btw(handler, body):
@@ -26009,7 +26037,7 @@ def _handle_background(handler, body):
             # clutter the sidebar or SESSION_DIR. The index is pruned on the
             # next rebuild via _index_entry_exists().
             try:
-                (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+                _remove_session_with_draft(SESSION_DIR / f"{bg_sid}.json")
             except Exception:
                 pass
         except Exception:
@@ -26508,7 +26536,7 @@ def _restore_chat_start_entry_sidecar(provenance) -> None:
     if sidecar_unknown:
         raise OSError("chat-start entry sidecar bytes are unavailable")
     if sidecar_bytes is None:
-        sidecar_path.unlink(missing_ok=True)
+        _remove_session_with_draft(sidecar_path)
     else:
         from api.models import _note_sidecar_write
 

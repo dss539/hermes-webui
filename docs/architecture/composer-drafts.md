@@ -1,0 +1,67 @@
+# Composer draft persistence
+
+Composer drafts use the single upstream store: `sessions/.drafts/<sid>.json`.
+A dedicated record, including an explicit empty record, overlays the embedded
+`composer_draft` compatibility snapshot. A damaged record retains upstream
+recovery: warn for malformed JSON/non-object payloads and fall back to the
+embedded draft. There is no quarantine or second draft authority.
+
+## Request ownership and cost
+
+An ordinary POST validates/coerces the text and attachment list, checks subagent
+ownership, reads fixed-identity ownership metadata, and takes only the draft
+lifecycle lock. It resolves ownership again under that lock before merging a
+partial update. It never acquires the transcript writer lock, calls the full
+Session resolver/load, rewrites an existing transcript, or touches its recency
+or index. Equal payloads are no-ops.
+
+The ownership cache retains only eleven metadata fields and is bounded to 128
+file revisions. The path/inode/size/mtime/ctime key invalidates it on replacement
+or external metadata edits, even when the full session is cached. Current
+writer headers contain every required field before the transcript. Old/custom
+layouts with missing fields require one read-only full JSON parse per uncached
+file revision; they are not assumed writable from incomplete provenance. This
+legacy fallback does not recover, self-heal or cache a transcript object.
+
+Subagent preflight retains the state.db source check and persisted
+source_tag/raw_source/session_source precedence. Persisted metadata is checked
+again before writing; all other routes keep their original shared preflight.
+
+## Compression and lifecycle synchronization
+
+Session property reads use a draft identity pinned at construction. A temporary
+snapshot session_id rebind does not change it; permanent compression ownership
+publication updates it, and rollback restores it. Draft responses use their
+request-local payload rather than assigning into a possibly rotated cached
+object. Export explicitly resolves the public property, with a safe default
+for session-like objects lacking that property.
+
+Snapshot-authority walks retain the transcript lock, bounded hops, durable
+profile/parent/continuation edge checks, target-lock revalidation, fail-closed
+responses, and `session_moved` replay contract. A snapshot discovered after
+ordinary preflight releases the draft lock before escalating to the transcript
+lock. Compression marker/publication and rollback hold the old identity's draft
+lifecycle lock, so an ordinary in-flight draft precedes the marker or observes
+its durable authority on recheck.
+
+First meaningful New Chat drafts still publish the small owner once under
+transcript -> draft -> cache lock ordering. An empty draft does not materialize
+a shell. Successful saves/loads distinguish persisted owners from new shells;
+a deleted persisted owner cannot be recreated as an unsaved shell.
+
+The fixed 64 lifecycle lock stripes are reentrant so a route may hold one across
+read/merge and invoke the existing atomic writer/removal helpers. Single and
+bulk deletion hold that same lock across owner unlink and draft deletion.
+Secondary removal paths (background completion, ephemeral success/cancel and
+admission rollback) remove both files. Existing failure reporting and orphan
+retry scanning remain; failed draft unlink does not abort other cleanup.
+
+Bulk cleanup waits at most 100 ms for each transcript writer lock, skips a busy
+owner without loading/evicting it, and reports `skipped`. Orphan retry transcript
+lock waits use the same bound. Once admitted, a cleanup may still wait for an
+in-flight small draft publication; this is not a whole-request deadline.
+
+Thread locks coordinate the existing single WebUI process, not independent
+multiprocess servers. Cross-tab writes remain last-arrival-wins. The existing
+file fsync/atomic replace durability and local-filesystem trust assumptions are
+unchanged; no directory-fsync or symlink-confinement guarantee is added.

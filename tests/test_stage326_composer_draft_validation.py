@@ -193,7 +193,7 @@ def test_draft_validation_appears_before_persist(monkeypatch, tmp_path):
         def __exit__(self, exc_type, exc, tb):
             return None
 
-    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: LockProbe())
+    monkeypatch.setattr(routes, "_draft_lifecycle_lock_for_session_id", lambda _sid: LockProbe())
 
     original_save = routes._save_session_draft
 

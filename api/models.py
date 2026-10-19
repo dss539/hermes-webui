@@ -3,6 +3,7 @@ import collections
 import contextvars
 import copy
 import datetime
+import functools
 import hashlib
 import inspect
 import json
@@ -307,14 +308,14 @@ def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
         _note_sidecar_write(session_id)
 
 
-_DRAFT_LIFECYCLE_LOCK_STRIPES: "tuple[threading.Lock, ...]" = tuple(
-    threading.Lock() for _ in range(64)
+_DRAFT_LIFECYCLE_LOCK_STRIPES = tuple(
+    threading.RLock() for _ in range(64)
 )
 _DRAFT_LIFECYCLE_LOCK_STRIPE_COUNT = len(_DRAFT_LIFECYCLE_LOCK_STRIPES)
 
 
-def _draft_lifecycle_lock_for_session_id(session_id: str) -> threading.Lock:
-    """Return the per-session lock that serializes draft save/delete operations."""
+def _draft_lifecycle_lock_for_session_id(session_id: str):
+    """Return the reentrant stripe serializing draft read/merge/save/delete."""
     sid = _normalize_session_id_for_path(session_id)
     if not sid:
         raise ValueError(f"Unsafe session_id {session_id!r}; refusing to lock draft lifecycle")
@@ -376,6 +377,10 @@ def _apply_session_draft_overlay(data: dict, session_id: str) -> dict:
         return data
     draft = _load_session_draft(session_id)
     if isinstance(draft, dict):
+        # Keep the embedded recovery snapshot separate from the live overlay.
+        # A later damaged record must not turn its last loaded value into the
+        # legacy fallback for an already-cached Session.
+        data['_embedded_composer_draft'] = data.get('composer_draft')
         data["composer_draft"] = draft
     return data
 
@@ -443,6 +448,14 @@ def _delete_session_draft_by_dir(session_id: str, sessions_dir: Path) -> bool:
 def _delete_session_draft(session_id: str) -> bool:
     """Delete the dedicated draft sidecar for *session_id*."""
     return _delete_session_draft_by_dir(session_id, SESSION_DIR)
+
+
+def _remove_session_with_draft(path) -> bool:
+    """Remove an owner and its draft under the same lifecycle lock."""
+    path = Path(path)
+    with _draft_lifecycle_lock_for_session_id(path.stem):
+        path.unlink(missing_ok=True)
+        return _delete_session_draft_by_dir(path.stem, path.parent)
 
 
 # Serializes index writers so concurrent Session.save() calls cannot race on
@@ -1839,7 +1852,9 @@ class Session:
         self.source_label = kwargs.get('source_label')
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
-        self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self._composer_draft_session_id = self.session_id
+        self._draft_identity_persisted = False
+        self.composer_draft = kwargs.get('_embedded_composer_draft', composer_draft)
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
@@ -1876,6 +1891,17 @@ class Session:
             if _parsed_visible_count is not None and _parsed_visible_count >= 0
             else None
         )
+
+    @property
+    def composer_draft(self):
+        # Compression snapshot saves temporarily rebind session_id. Only the
+        # permanent ownership handoff may change this property's store identity.
+        draft = _load_session_draft(self._composer_draft_session_id)
+        return draft if isinstance(draft, dict) else self._composer_draft
+
+    @composer_draft.setter
+    def composer_draft(self, value):
+        self._composer_draft = value if isinstance(value, dict) else {}
 
     @property
     def path(self):
@@ -2186,6 +2212,7 @@ class Session:
                 pass
             raise
 
+        self._draft_identity_persisted = True
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
         # row is alive (the #4985 "zero-message orphan" only ever exists
@@ -2228,6 +2255,7 @@ class Session:
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
+        session._draft_identity_persisted = True
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -6784,6 +6812,189 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             _finish_full_session_resolve(session_id, event)
 
 
+def _read_draft_owner_fields(path, fields):
+    """Read selected top-level values, skipping other JSON without retaining it.
+
+    Modern files validate the complete metadata header through the first
+    messages-array opener, even with oversized metadata. Legacy layouts with
+    missing provenance validate through EOF, once per uncached file revision.
+    Neither the transcript nor skipped string values are materialized.
+    """
+    string_special = re.compile(r'["\\\x00-\x1f]')
+    wanted = set(fields)
+    data = {}
+    with open(path, 'r', encoding='utf-8') as stream:
+        buf, pos = '', 0
+
+        def peek():
+            nonlocal buf, pos
+            if pos == len(buf):
+                buf, pos = stream.read(32 * 1024), 0
+            return buf[pos:pos + 1]
+
+        def take():
+            nonlocal pos
+            char = peek()
+            if not char:
+                raise ValueError('Truncated session ownership JSON')
+            pos += 1
+            return char
+
+        def whitespace():
+            while peek() and peek() in ' \r\n\t':
+                take()
+
+        def expect(char):
+            if take() != char:
+                raise ValueError('Invalid session ownership JSON')
+
+        def string(keep):
+            nonlocal pos
+            expect('"')
+            parts = []
+            while True:
+                if not peek():
+                    raise ValueError('Truncated session ownership string')
+                match = string_special.search(buf, pos)
+                end = match.start() if match else len(buf)
+                if keep:
+                    parts.append(buf[pos:end])
+                pos = end
+                if match is None:
+                    continue
+                char = take()
+                if char == '"':
+                    return json.loads('"' + ''.join(parts) + '"') if keep else None
+                if char != '\\':
+                    raise ValueError('Invalid session ownership string')
+                escape = take()
+                raw = '\\' + escape
+                if escape == 'u':
+                    digits = ''.join(take() for _ in range(4))
+                    if any(c not in '0123456789abcdefABCDEF' for c in digits):
+                        raise ValueError('Invalid session ownership escape')
+                    raw += digits
+                elif escape not in '"\\/bfnrt':
+                    raise ValueError('Invalid session ownership escape')
+                if keep:
+                    parts.append(raw)
+
+        def value(keep):
+            whitespace()
+            char = peek()
+            if char == '"':
+                return string(keep)
+            if char in ('{', '['):
+                take()
+                is_object = char == '{'
+                close = '}' if is_object else ']'
+                mapping, items = {}, []
+                whitespace()
+                if peek() == close:
+                    take()
+                    return mapping if is_object else items
+                while True:
+                    key = None
+                    if is_object:
+                        key = string(keep)
+                        whitespace()
+                        expect(':')
+                    child = value(keep)
+                    if keep:
+                        if is_object:
+                            mapping[key] = child
+                        else:
+                            items.append(child)
+                    whitespace()
+                    delimiter = take()
+                    if delimiter == close:
+                        return mapping if is_object else items
+                    if delimiter != ',':
+                        raise ValueError('Invalid session ownership container')
+                    whitespace()
+            token = []
+            while peek() and peek() not in ' \r\n\t,]}':
+                token.append(take())
+            # The decoder validates literals/numbers even in skipped values.
+            scalar = json.loads(''.join(token))
+            return scalar if keep else None
+
+        whitespace()
+        expect('{')
+        whitespace()
+        if peek() == '}':
+            take()
+            whitespace()
+            if peek():
+                raise ValueError('Trailing session ownership JSON')
+            return data
+        in_header = True
+        while True:
+            key = string(True)
+            whitespace()
+            expect(':')
+            whitespace()
+            if key == 'messages':
+                # Only the first transcript boundary can finish a modern header.
+                # Seeing every field once is not enough: later header duplicates
+                # use the same last-value semantics as json.loads(). A legacy
+                # layout missing any field must instead validate through EOF.
+                if in_header and wanted <= data.keys() and peek() == '[':
+                    take()
+                    return data
+                in_header = False
+            keep = key in wanted
+            child = value(keep)
+            if keep:
+                data[key] = child
+            whitespace()
+            delimiter = take()
+            if delimiter == '}':
+                whitespace()
+                if peek():
+                    raise ValueError('Trailing session ownership JSON')
+                return data
+            if delimiter != ',':
+                raise ValueError('Invalid session ownership object')
+            whitespace()
+
+
+@functools.lru_cache(maxsize=128)
+def _draft_owner_metadata(path, signature):
+    # Retain ownership fields only, never messages. Atomic replacement or an
+    # external metadata edit invalidates the cache even on a warm Session hit.
+    fields = ('session_id', 'title', 'workspace', 'profile', 'composer_draft',
+              'source_tag', 'raw_source', 'session_source',
+              'pre_compression_snapshot', 'pre_compression_continuation_session_id',
+              'parent_session_id')
+    return _read_draft_owner_fields(path, fields)
+
+
+def get_session_for_draft(sid, *, allow_missing_cached=False):
+    """Resolve fixed draft ownership without transcript loading or recovery."""
+    if not is_safe_session_id(sid):
+        raise KeyError(sid)
+    path = SESSION_DIR / f'{sid}.json'
+    try:
+        stat = path.stat()
+        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        data = _draft_owner_metadata(path, signature)
+    except FileNotFoundError:
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            if (cached is not None and cached.session_id == sid
+                    and not getattr(cached, '_loaded_metadata_only', False)
+                    and (allow_missing_cached or not getattr(cached, '_draft_identity_persisted', False))):
+                return cached
+        raise KeyError(sid) from None
+    if data.get('session_id') != sid:
+        raise KeyError(sid)
+    session = Session(**data)
+    session._loaded_metadata_only = True
+    session._draft_identity_persisted = True
+    return session
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping messages)."""
     return _resolve_session(sid, metadata_only=metadata_only)
@@ -6802,12 +7013,9 @@ def get_session_profile_readonly(sid):
             return profile
     path = SESSION_DIR / f'{sid}.json'
     try:
-        prefix = _read_metadata_json_prefix(path)
-        data = json.loads(prefix) if prefix else None
-        # Legacy layouts may put profile after messages/scenes. Read the JSON
-        # directly: Session.load() can collapse partials and save a shrink backup.
-        if not isinstance(data, dict) or 'profile' not in data:
-            data = json.loads(path.read_bytes())
+        stat = path.stat()
+        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        data = _draft_owner_metadata(path, signature)
     except FileNotFoundError:
         raise KeyError(sid) from None
     if not isinstance(data, dict) or data.get('session_id') != sid:
