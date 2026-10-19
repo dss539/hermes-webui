@@ -776,7 +776,7 @@ def read_importable_agent_session_rows(
 
     log = log or logger
     from api.agent_session_summaries import summary_connection
-    with summary_connection(db_path, ordered=True) as conn:
+    with summary_connection(db_path, bounded=limit is not None) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
@@ -992,8 +992,8 @@ def read_importable_agent_session_rows(
             )
 
         # Non-summary consumers retain the original joined aggregate SQL.
-        # Any tied effective activity key uses that exact source query, bounded
-        # or unbounded: index creation order and statistics can alter tie order.
+        # SQLite's bounded tie order depends on the source index layout, not
+        # just the ORDER BY text. Uncertified layouts use this exact legacy path.
 
         if getattr(conn, 'sidebar_summary', False) and use_messages_join:
             # The exact aggregate reconciliation is shared by every SQL consumer.

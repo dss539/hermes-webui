@@ -6237,13 +6237,10 @@ function _dropStaleOptimisticSessionRow(sid){
   if(typeof _forgetObservedStreamingSession==='function') _forgetObservedStreamingSession(sid);
 }
 
-function _mergeOptimisticFirstTurnSessions(fetchedSessions,detached=false){
+function _mergeOptimisticFirstTurnSessions(fetchedSessions){
   // Adoption boundary: server/ETag facts never alias the locally mutable model,
   // including nested attention/lineage data. A 304 must replay server truth.
-  // The response boundary's serialized JSON can supply already-detached rows.
-  // Other callers still get a safe JSON copy (functions are omitted, not thrown).
-  const merged=Array.isArray(fetchedSessions)
-    ? (detached?[...fetchedSessions]:JSON.parse(JSON.stringify(fetchedSessions))) : [];
+  const merged=Array.isArray(fetchedSessions)?structuredClone(fetchedSessions):[];
   const bySid=new Map();
   merged.forEach((s,idx)=>{if(s&&s.session_id) bySid.set(s.session_id,idx);});
   for(const local of Array.isArray(_allSessions)?_allSessions:[]){
@@ -6367,19 +6364,17 @@ let _sidebarPendingPaint = null;
 function _flushPendingSidebarPaint(){
   if(!_sidebarPendingPaint || _renamingSid || _sessionActionMenu || _sessionListSkeletonActive) return;
   const pending=_sidebarPendingPaint;
-  const record=(completed,chunked=false)=>{
-    // Only a completed chunked job can certify while an interaction is open;
-    // its fill loop preserves existing anchors. Sync renderers still need the
-    // post-invocation bail check, and cancelled/incomplete jobs never certify.
-    if(completed===false || _sessionListSkeletonActive
-      || ((!chunked || completed!==true) && (_renamingSid || _sessionActionMenu))
+  const record=completed=>{
+    // A synchronous renderer can decline the paint too. Recheck its bail
+    // conditions after invocation, just as for a chunked completion.
+    if(completed===false || _renamingSid || _sessionActionMenu || _sessionListSkeletonActive
       || _sidebarPendingPaint!==pending || _allSessions!==pending.sessions) return;
     _lastSessionListRenderSig=pending.signature;
     _sidebarPendingPaint=null;
     _recordSidebarPaint(pending.sessData);
   };
   const paint=renderSessionListFromCache();
-  if(paint && typeof paint.then==='function') return paint.then(completed=>record(completed,true));
+  if(paint && typeof paint.then==='function') return paint.then(record);
   record(paint);
   return paint;
 }
@@ -6434,19 +6429,14 @@ function _applySessionListPayload(sessData, projData, opts){
   if (typeof sessData.server_tz === 'string') {
     _serverTz = sessData.server_tz;
   }
-  // Reuse response-boundary serialization for 304/deferred re-adoption, but
-  // parse fresh mutable rows every time. Local enrichment must never alter the
-  // validator's raw JSON. Direct/boot callers use the same JSON-only boundary.
-  const [detachedSessions,detachedReferences]=JSON.parse(sessData._sidebarRowsJSON || JSON.stringify([
-    Array.isArray(sessData.sessions)?sessData.sessions:[],
-    Array.isArray(sessData.sidebar_reference_sessions)?sessData.sidebar_reference_sessions:[],
-  ]));
   const serverSessions=_optimisticallyRemovedSessionIds.size
-    ? detachedSessions.filter(s=>s&&!_optimisticallyRemovedSessionIds.has(s.session_id))
-    : detachedSessions;
-  _sidebarReferenceSessions = detachedReferences;
+    ? (sessData.sessions||[]).filter(s=>s&&!_optimisticallyRemovedSessionIds.has(s.session_id))
+    : (sessData.sessions||[]);
+  _sidebarReferenceSessions = Array.isArray(sessData.sidebar_reference_sessions)
+    ? structuredClone(sessData.sidebar_reference_sessions)
+    : [];
   _reconcileActiveSessionIdleStateFromList(serverSessions);
-  _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions,true);
+  _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
   // Tag the cache with the scope it was loaded under (active profile +
   // all-profiles flag). If a later /api/sessions fails right after a profile
   // switch, the catch path checks this so it won't re-render the PRIOR
@@ -6859,15 +6849,6 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)
     return {sessData:validator.sessData,projData,serverTime:response.serverTime};
   }
   const sessData=response.data;
-  if(sessData && typeof sessData==='object'){
-    // Capture plain server JSON before any local objects can be attached.
-    // Reuse this serialization across deferred adoption and exact 304 replay;
-    // the render signature still covers the fully reconciled local model.
-    Object.defineProperty(sessData,'_sidebarRowsJSON',{value:JSON.stringify([
-      Array.isArray(sessData.sessions)?sessData.sessions:[],
-      Array.isArray(sessData.sidebar_reference_sessions)?sessData.sidebar_reference_sessions:[],
-    ]),enumerable:false});
-  }
   if(response.etag && sessData && typeof sessData==='object'){
     Object.defineProperty(sessData,'_sidebarValidator',{value:{scope,etag:response.etag},enumerable:false});
     if(requestSequence===_sidebarRequestSequence){
