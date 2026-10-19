@@ -101,7 +101,6 @@ class _Reader:
         ).fetchone()
         if (not required <= names or not ddl or
                 any(word in ddl[0].upper() for word in ('COLLATE', 'WITHOUT ROWID', 'GENERATED')) or
-                len([row for row in shape if row[5]]) != 1 or
                 not any(row[1] == 'id' and row[2].upper() == 'TEXT' and row[5] == 1 for row in shape)):
             raise UnsupportedSummary('nonstandard sessions schema')
         self.columns = [name for name in _COLUMNS if name in names]
@@ -112,13 +111,8 @@ class _Reader:
                 not message_ddl or any(word in message_ddl[0].upper() for word in ('COLLATE', 'WITHOUT ROWID', 'GENERATED')) or
                 not {'session_id', 'id', 'role', 'timestamp'} <= self.message_columns or
                 not any(row[1] == 'session_id' and row[2].upper() == 'TEXT' for row in self.message_shape) or
-                not any(row[1] == 'timestamp' and row[2].upper() == 'REAL' for row in self.message_shape) or
-                len([row for row in self.message_shape if row[5]]) != 1 or
-                any(row[3] == 'pk' for row in source.execute('PRAGMA index_list(messages)')) or
                 not any(row[1] == 'id' and row[2].upper() == 'INTEGER' and row[5] == 1 for row in self.message_shape)):
-            # COUNT(id) and COUNT(*) coincide only for the canonical rowid alias.
-            # REAL affinity also prevents equal 1/1.0 MAX ties returning different
-            # storage classes in scalar-indexed versus grouped consumer queries.
+            # COUNT(id) and COUNT(*) coincide only for the canonical integer PK.
             raise UnsupportedSummary('legacy messages schema')
         local = sqlite3.connect(':memory:', factory=_SummaryConnection, check_same_thread=False)
         try:

@@ -25,7 +25,7 @@ def db(tmp_path):
             CREATE INDEX idx_sessions_source ON sessions(source);
             CREATE INDEX idx_sessions_started ON sessions(started_at DESC);
             CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
-            CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content,timestamp REAL,active INTEGER,compacted INTEGER);
+            CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content,timestamp,active INTEGER,compacted INTEGER);
             CREATE INDEX idx_messages_session ON messages(session_id,timestamp);
             INSERT INTO sessions VALUES('a','cli','A','model',999,1,5,'compression',NULL,NULL,NULL,0);
             INSERT INTO sessions VALUES('b','cli','B','model',2,6,NULL,NULL,'a',NULL,'p',0);
