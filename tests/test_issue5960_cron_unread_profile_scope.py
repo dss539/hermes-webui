@@ -751,9 +751,6 @@ function animateNextSessionListRefresh(){{}}
 function ensureSessionEventsSSE(){{}}
 function _activeSessionIdForSidebar(){{ return null; }}
 function _recordSidebarProjection(){{}}
-function _recordSidebarPaint(){{}}
-let _sidebarPendingPaint=null;
-function _flushPendingSidebarPaint(){{ renderSessionListFromCache(); }}
 function _sessionListRenderSignature(){{ return 'sig'; }}
 function _purgeStaleInflightEntries(){{}}
 let _sessionListSkeletonActive=false;
@@ -880,9 +877,6 @@ function ensureActiveSessionExternalRefreshPoll(){{}}
 function animateNextSessionListRefresh(){{}}
 function ensureSessionEventsSSE(){{}}
 function _recordSidebarProjection(){{}}
-function _recordSidebarPaint(){{}}
-let _sidebarPendingPaint=null;
-function _flushPendingSidebarPaint(){{ renderSessionListFromCache(); }}
 function _sessionListRenderSignature(){{ return 'sig'; }}
 function _purgeStaleInflightEntries(){{}}
 let _sessionListSkeletonActive=false;

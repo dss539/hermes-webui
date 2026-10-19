@@ -89,7 +89,7 @@ def _capture_listing_sql(monkeypatch):
     from contextlib import contextmanager
     from api import agent_session_summaries
     @contextmanager
-    def legacy_reader(path, **_options):
+    def legacy_reader(path):
         with closing(agent_sessions.open_state_db_readonly(path)) as conn:
             yield conn
     monkeypatch.setattr(agent_session_summaries, 'summary_connection', legacy_reader)

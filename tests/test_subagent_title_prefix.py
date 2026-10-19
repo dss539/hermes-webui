@@ -65,8 +65,6 @@ def test_rename_open_then_cancel_keeps_cached_title_fields():
     function _markNonCredentialInput(inp){{return inp;}}
     function closeSessionActionMenu(){{}}
     function renderSessionListFromCache(){{}}
-    function _resumePendingSidebarPaint(){{}}
-    let _sidebarPendingPaint=null;
     function syncTopbar(){{}}
     let inp=null;
     const document={{createElement(){{inp={{isConnected:false,addEventListener(){{}},replaceWith(){{}},focus(){{}},select(){{}}}};return inp;}}}};

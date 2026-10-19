@@ -5584,10 +5584,7 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
       const releaseRename=()=>{
         _renamingSid=null;
         if(inp.isConnected) inp.replaceWith(displayEl);
-        setTimeout(()=>{ if(_renamingSid===null){
-          if(_sidebarPendingPaint) _resumePendingSidebarPaint();
-          else renderSessionListFromCache();
-        } },50);
+        setTimeout(()=>{ if(_renamingSid===null){renderSessionListFromCache();_resumePendingSidebarPaint();} },50);
       };
       if(!save){
         applyTitle(oldTitle,false);
@@ -6238,9 +6235,7 @@ function _dropStaleOptimisticSessionRow(sid){
 }
 
 function _mergeOptimisticFirstTurnSessions(fetchedSessions){
-  // Adoption boundary: server/ETag facts never alias the locally mutable model,
-  // including nested attention/lineage data. A 304 must replay server truth.
-  const merged=Array.isArray(fetchedSessions)?structuredClone(fetchedSessions):[];
+  const merged=Array.isArray(fetchedSessions)?[...fetchedSessions]:[];
   const bySid=new Map();
   merged.forEach((s,idx)=>{if(s&&s.session_id) bySid.set(s.session_id,idx);});
   for(const local of Array.isArray(_allSessions)?_allSessions:[]){
@@ -6360,22 +6355,20 @@ function _syncSessionAttentionSoundState(sessions){
 // failure returns null → never skip (fail-open). (#5455 WS2.4)
 let _lastSessionListRenderSig = null;
 let _sidebarPendingPaint = null;
+let _sidebarPaintedValidator = null;
 
 function _flushPendingSidebarPaint(){
   if(!_sidebarPendingPaint || _renamingSid || _sessionActionMenu || _sessionListSkeletonActive) return;
   const pending=_sidebarPendingPaint;
   const record=completed=>{
-    // A synchronous renderer can decline the paint too. Recheck its bail
-    // conditions after invocation, just as for a chunked completion.
-    if(completed===false || _renamingSid || _sessionActionMenu || _sessionListSkeletonActive
-      || _sidebarPendingPaint!==pending || _allSessions!==pending.sessions) return;
+    if(completed===false || _sidebarPendingPaint!==pending || _allSessions!==pending.sessions) return;
     _lastSessionListRenderSig=pending.signature;
     _sidebarPendingPaint=null;
     _recordSidebarPaint(pending.sessData);
   };
   const paint=renderSessionListFromCache();
   if(paint && typeof paint.then==='function') return paint.then(record);
-  record(paint);
+  record(true);
   return paint;
 }
 
@@ -6433,7 +6426,7 @@ function _applySessionListPayload(sessData, projData, opts){
     ? (sessData.sessions||[]).filter(s=>s&&!_optimisticallyRemovedSessionIds.has(s.session_id))
     : (sessData.sessions||[]);
   _sidebarReferenceSessions = Array.isArray(sessData.sidebar_reference_sessions)
-    ? structuredClone(sessData.sidebar_reference_sessions)
+    ? sessData.sidebar_reference_sessions
     : [];
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
@@ -6521,8 +6514,6 @@ function _applySessionListPayload(sessData, projData, opts){
     && _sidebarPendingPaint && _sidebarPendingPaint.sessions===previousSessions
     && _renderSig && _renderSig===_sidebarPendingPaint.signature){
     // Reconcile a 304 without cancelling an identical in-progress paint.
-    // _sessionListRenderSignature includes JSON of ALL merged rows: equality
-    // proves restoring previousSessions cannot discard any new server value.
     _allSessions=previousSessions;
     _sidebarPendingPaint.sessData=sessData;
     return _sessionListPaintJob.completion;
@@ -6660,7 +6651,7 @@ async function _runRenderSessionListRefresh(opts, _gen){
     }
     const payloadPromise=_loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts);
     _restoreSidebarBootCache(sessionListQS);
-    const {sessData, projData, serverTime}=await payloadPromise;
+    const {sessData, projData, unchanged, serverTime}=await payloadPromise;
     // Release parsing/startup work before adopting and painting the list.
     await new Promise(resolve=>setTimeout(resolve,0));
     // Discard stale response — a newer renderSessionList() call superseded us.
@@ -6734,13 +6725,11 @@ function _recordSidebarProjection(sessData){
   // Adoption is independent of receipt and of a completed DOM paint.
   _sidebarShowingLastKnown=false;
   _sidebarSessionValidator=sessData._sidebarValidator ? {...sessData._sidebarValidator,sessData} : null;
-  // Adoption owns this validator now; do not retain a redundant received slot.
-  // A newer, not-yet-adopted response must remain available for exact 304 replay.
-  if(_sidebarReceivedValidator && _sidebarReceivedValidator.sessData===sessData) _sidebarReceivedValidator=null;
 }
 
 function _recordSidebarPaint(sessData){
   _sidebarShowingLastKnown=false;
+  _sidebarPaintedValidator=sessData._sidebarValidator ? {...sessData._sidebarValidator} : null;
   const list=$('sessionList');
   if(list){list.dataset.freshness='current';list.removeAttribute('aria-busy');}
   const note=$('sidebarCacheStatus');if(note) note.remove();
@@ -6828,7 +6817,6 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)
   })();
 
   const scope=_sidebarSessionScopeKey(sessionListQS);
-  if(_sidebarReceivedValidator && _sidebarReceivedValidator.scope!==scope) _sidebarReceivedValidator=null;
   const requestSequence=++_sidebarRequestSequence;
   // A superseded response may be revalidated but never treated as already
   // painted. This avoids downloading it again when an SSE snapshot queued a
@@ -6846,7 +6834,7 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)
   if(response.unchanged){
     if(!validator) throw new Error('Sidebar validator without a received projection');
     if(Number.isFinite(response.serverTime) && response.serverTime>0) validator.sessData.server_time=response.serverTime;
-    return {sessData:validator.sessData,projData,serverTime:response.serverTime};
+    return {sessData:validator.sessData,projData,unchanged:!!(applied&&applied.etag===validator.etag),serverTime:response.serverTime};
   }
   const sessData=response.data;
   if(response.etag && sessData && typeof sessData==='object'){
@@ -6855,7 +6843,7 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)
       _sidebarReceivedValidator={scope,etag:response.etag,sessData};
     }
   }
-  return {sessData,projData};
+  return {sessData,projData,unchanged:false};
 }
 
 async function _drainRenderSessionListQueue(initialRequest){
@@ -9030,9 +9018,9 @@ function _flushSidebarUnreadBaselineBatch(baselineBatch){
 function _scheduleSidebarPaintTask(callback){
   // postTask avoids the nested-timer clamp without retaining a long task. Each
   // callback still releases the thread for input/rendering before the next slice.
-  if(globalThis.scheduler && typeof globalThis.scheduler.postTask==='function' && typeof globalThis.TaskController!=='undefined'){
-    const controller=new globalThis.TaskController({priority:'user-blocking'});
-    globalThis.scheduler.postTask(callback,{signal:controller.signal}).catch(error=>{
+  if(globalThis.scheduler && typeof scheduler.postTask==='function' && typeof TaskController!=='undefined'){
+    const controller=new TaskController({priority:'user-blocking'});
+    scheduler.postTask(callback,{signal:controller.signal}).catch(error=>{
       if(error.name!=='AbortError') console.error('Sidebar paint failed',error);
     });
     return ()=>controller.abort();

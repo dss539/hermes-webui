@@ -37,14 +37,13 @@ def db(tmp_path):
 
 
 @contextmanager
-def legacy(path, **_options):
+def legacy(path):
     with closing(agent.open_state_db_readonly(path)) as c:
         yield c
 
 
 def compare(path, monkeypatch):
     outputs = []
-    fallbacks_before = summaries.counters().get('legacy_fallbacks', 0)
     real = summaries.summary_connection
     for connection in (real, legacy):
         with monkeypatch.context() as m:
@@ -56,10 +55,7 @@ def compare(path, monkeypatch):
                               {'project_assignment': 'assigned'}, {'project_assignment': 'unassigned'})
             ] + [agent.read_session_lineage_metadata(path, {'a','b','c'})])
     assert outputs[0] == outputs[1]
-    # This deliberately sparse index layout cannot certify bounded tie order.
-    # Only the 3 bounded limits x 4 scopes fall back; unbounded/lineage still
-    # exercise summary reconciliation and all its exact changed-row assertions.
-    assert summaries.counters().get('legacy_fallbacks', 0) - fallbacks_before == 12
+    assert summaries.counters().get('legacy_fallbacks', 0) == 0
 
 
 @pytest.mark.parametrize('sql', [

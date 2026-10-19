@@ -21,7 +21,7 @@ def reset():
 
 
 @contextmanager
-def legacy(path, **_options):
+def legacy(path):
     with closing(agent.open_state_db_readonly(path)) as connection:
         yield connection
 

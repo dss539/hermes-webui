@@ -511,11 +511,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
             # Avoid N filesystem exists() checks under LOCK by collecting
             # on-disk IDs once before entering the critical section.
             on_disk_ids = _persisted_session_ids_snapshot()
-            from api.sidebar_revision import path_revision
-            previous_source = path_revision(session_index_file)
             existing = json.loads(session_index_file.read_bytes())
-            if path_revision(session_index_file) != previous_source:
-                previous_source = None
             if not isinstance(existing, list):
                 raise ValueError("session index must be a list")
             with LOCK:
@@ -548,10 +544,7 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                     index_stat = os.fstat(f.fileno())
                 _safe_replace(_tmp, session_index_file)
                 from api.session_summary_index import publish_index
-                publish_index(session_index_file, existing,
-                    (index_stat.st_dev, index_stat.st_ino, index_stat.st_mtime_ns, index_stat.st_size),
-                    updates=updated_map, order=[str(row['session_id']) for row in existing],
-                    previous_source=previous_source)
+                publish_index(session_index_file, existing, (index_stat.st_dev, index_stat.st_ino, index_stat.st_mtime_ns, index_stat.st_size))
             except Exception:
                 try:
                     _tmp.unlink(missing_ok=True)
