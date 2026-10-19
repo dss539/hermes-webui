@@ -13,14 +13,7 @@ from api import sidebar_revision as revision
 
 
 @pytest.fixture(autouse=True)
-def clear(monkeypatch):
-    # These probes deliberately assign model globals. Record their originals
-    # before setup so neither synthetic paths nor the fake persisted-id reader
-    # can survive into later files in a suite shard.
-    for name in ('SESSION_DIR', 'SESSION_INDEX_FILE', '_persisted_session_ids_snapshot',
-                 '_PERSISTED_SESSION_IDS_CACHE'):
-        monkeypatch.setattr(models, name, getattr(models, name))
-    monkeypatch.setattr(models, 'SESSIONS', {})
+def clear():
     index.clear()
     yield
     index.clear()

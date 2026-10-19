@@ -76,12 +76,6 @@ def test_fallback_executes_identical_production_candidate_sql(tmp_path,productio
     with summaries.summary_connection(path,ordered=True) as conn:
         assert not getattr(conn,'sidebar_summary',False)
         conn.set_trace_callback(actual_sql.append)
-    real_connect=sqlite3.connect
-    def traced(*args,**kwargs):
-        conn=real_connect(*args,**kwargs)
-        conn.set_trace_callback(actual_sql.append)
-        return conn
-    monkeypatch.setattr(sqlite3,'connect',traced)
     actual=agent.read_importable_agent_session_rows(path,**kwargs)
     candidate=lambda sql:[s for s in sql if s.lstrip().startswith('WITH candidates AS')]
     assert candidate(expected_sql) and candidate(expected_sql)==candidate(actual_sql)

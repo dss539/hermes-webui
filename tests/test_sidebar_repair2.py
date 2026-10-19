@@ -166,7 +166,7 @@ def canonical_db(tmp_path):
 
 
 @pytest.mark.parametrize('mutation',['canonical','extra','missing','wrong_columns','partial','unique','analyzed'])
-def test_tied_bounded_reads_use_exact_legacy_sql_across_index_layouts(tmp_path,mutation):
+def test_bounded_guard_exact_legacy_source_and_canonical_summary(tmp_path,mutation):
     path=canonical_db(tmp_path)
     with sqlite3.connect(path) as c:
         if mutation=='extra':c.execute('CREATE INDEX surprise ON sessions(title,source)')

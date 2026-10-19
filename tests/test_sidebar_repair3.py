@@ -103,18 +103,11 @@ def test_tie_changes_invalidate_admission_and_keep_one_source(tmp_path):
     assert summaries.counters()['full_fact_rereads']==3
 
 
-def test_unchanged_schema_read_precedes_order_certification(tmp_path,monkeypatch):
+def test_unchanged_schema_read_precedes_order_certification(tmp_path):
     path=build(tmp_path/'state.db',keys=(10,10,20))
     with summaries.summary_connection(path) as conn:
         source=conn.sidebar_source
         trace=[];source.set_trace_callback(trace.append)
-    real_connect=sqlite3.connect
-    def traced(*args,**kwargs):
-        conn=real_connect(*args,**kwargs)
-        if kwargs.get('check_same_thread') is False:
-            conn.set_trace_callback(trace.append)
-        return conn
-    monkeypatch.setattr(sqlite3,'connect',traced)
     same(path,limit=1)
     assert next(i for i,s in enumerate(trace) if s=='PRAGMA schema_version') < next(i for i,s in enumerate(trace) if s.startswith('PRAGMA table_info'))
     assert summaries.counters()['unchanged']==1
