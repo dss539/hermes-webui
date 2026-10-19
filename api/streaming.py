@@ -16166,7 +16166,8 @@ def _run_agent_streaming(
                     _checkpoint_stop.set()
                 try:
                     from api.models import _remove_session_with_draft
-                    _remove_session_with_draft(s.path)
+                    with _agent_lock:
+                        _remove_session_with_draft(s.path)
                 except Exception:
                     pass
                 return  # skip all normal persistence for ephemeral sessions

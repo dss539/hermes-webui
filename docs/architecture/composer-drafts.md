@@ -4,7 +4,12 @@ Composer drafts use the single upstream store: `sessions/.drafts/<sid>.json`.
 A dedicated record, including an explicit empty record, overlays the embedded
 `composer_draft` compatibility snapshot. A damaged record retains upstream
 recovery: warn for malformed JSON/non-object payloads and fall back to the
-embedded draft. There is no quarantine or second draft authority.
+embedded draft. There is no quarantine or second draft authority. Successful
+full owner saves refresh the in-memory fallback from their serialized embedded
+snapshot, not merely from draft reads. Concurrent saves retain independent
+temporary files and replacements; a short fallback-publication lock and the
+written file revision prevent a delayed older save from regressing that fallback.
+Ordinary draft POSTs never acquire this publication lock.
 
 ## Request ownership and cost
 
@@ -13,15 +18,28 @@ ownership, reads fixed-identity ownership metadata, and takes only the draft
 lifecycle lock. It resolves ownership again under that lock before merging a
 partial update. It never acquires the transcript writer lock, calls the full
 Session resolver/load, rewrites an existing transcript, or touches its recency
-or index. Equal payloads are no-ops.
+or index. Equal payloads are no-ops. Draft GET uses the same read-only owner
+resolver, and both methods reject unsafe identifiers with HTTP 400. The atomic
+writer escapes lone Unicode surrogates without changing ordinary UTF-8 output.
 
 The ownership cache retains only eleven metadata fields and is bounded to 128
 file revisions. The path/inode/size/mtime/ctime key invalidates it on replacement
-or external metadata edits, even when the full session is cached. Current
-writer headers contain every required field before the transcript. Old/custom
-layouts with missing fields require one read-only full JSON parse per uncached
-file revision; they are not assumed writable from incomplete provenance. This
-legacy fallback does not recover, self-heal or cache a transcript object.
+or external metadata edits, even when the full session is cached. The read-only
+profile gate shares these validated facts without promoting a Session object.
+Current writer headers contain every required field before the transcript. The
+reader validates the complete header up to the first `messages` array opener,
+using last-value semantics for repeated header keys. Merely seeing each field
+once does not authorize a write; malformed/truncated headers fail closed. The
+transcript body beyond that intentional modern boundary is not parsed.
+
+Old/custom layouts with missing fields require one bounded-memory streaming
+scan through EOF per uncached file revision. The reader must establish absent
+provenance, so this first scan is transcript-sized and can be slower than a full
+JSON decode. Warm requests, even without a cached Session object, reuse the
+same revision's facts. Replacement, external edits, cache eviction or restart
+can require another legacy scan; this is not an unconditional first-save-only
+latency guarantee. Normal modern headers remain transcript-size-independent.
+This compatibility path does not recover, self-heal or cache a transcript object.
 
 Subagent preflight retains the state.db source check and persisted
 source_tag/raw_source/session_source precedence. Persisted metadata is checked

@@ -308,6 +308,27 @@ def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
         _note_sidecar_write(session_id)
 
 
+_EMBEDDED_DRAFT_PUBLICATION_LOCK = threading.Lock()
+
+
+def _publish_embedded_draft(session, published_stat, draft):
+    """Refresh fallback only while this save still owns the published sidecar.
+
+    Replacements remain independent (including concurrent skip-index saves).
+    Only the revision check and fallback assignment are serialized, so a save
+    delayed after replacement cannot regress a newer publication's fallback.
+    ctime is excluded because rename itself may change it.
+    """
+    with _EMBEDDED_DRAFT_PUBLICATION_LOCK:
+        try:
+            current = session.path.stat()
+        except FileNotFoundError:
+            return
+        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns')
+        if all(getattr(current, key) == getattr(published_stat, key) for key in fields):
+            session._composer_draft = copy.deepcopy(draft)
+
+
 _DRAFT_LIFECYCLE_LOCK_STRIPES = tuple(
     threading.RLock() for _ in range(64)
 )
@@ -399,6 +420,10 @@ def _save_session_draft(session_id: str, draft) -> None:
             f'{path.name}.tmp.{os.getpid()}.{threading.current_thread().ident}'
         )
         body = json.dumps(payload, ensure_ascii=False, indent=2)
+        try:
+            body.encode('utf-8')
+        except UnicodeEncodeError:
+            body = json.dumps(payload, ensure_ascii=True, indent=2)
         try:
             with open(tmp, 'w', encoding='utf-8') as f:
                 f.write(body)
@@ -2182,11 +2207,14 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
+                published_stat = os.fstat(f.fileno())
             if skip_index:
                 # Callers that explicitly skip the sidebar projection retain
                 # the existing same-session concurrency contract: their unique
                 # temp files may replace the sidecar independently.
                 _replace_session_sidecar(tmp, self.path, self.session_id)
+                self._draft_identity_persisted = True
+                _publish_embedded_draft(self, published_stat, meta['composer_draft'])
             else:
                 # Publish the sidecar and its sidebar projection as one ordered
                 # operation. _write_session_index() uses this same RLock, so the
@@ -2196,6 +2224,8 @@ class Session:
                 # only the index with its frozen projection.
                 with _INDEX_WRITE_LOCK:
                     _replace_session_sidecar(tmp, self.path, self.session_id)
+                    self._draft_identity_persisted = True
+                    _publish_embedded_draft(self, published_stat, meta['composer_draft'])
                     # Build the sidebar entry from the same guarded transcript
                     # snapshot as the JSON payload. A shallow copy avoids
                     # rebinding/mutating the live Session while keeping message
@@ -2212,7 +2242,6 @@ class Session:
                 pass
             raise
 
-        self._draft_identity_persisted = True
         # #4985 belt-and-suspenders self-heal: a successful save with at
         # least one real message on the sidecar is unconditional proof the
         # row is alive (the #4985 "zero-message orphan" only ever exists

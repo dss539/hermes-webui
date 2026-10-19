@@ -248,3 +248,49 @@ def test_snapshot_published_after_preflight_escalates_without_changing_target(tm
     assert status == 409 and payload['code'] == 'session_moved' and payload['session_id'] == next_sid
     assert old_sid in agent_locks and next_sid in agent_locks
     assert not models._session_draft_path(old_sid).exists() and not models._session_draft_path(next_sid).exists()
+
+
+def test_delete_wins_before_ordinary_draft_lifecycle_and_prevents_recreation(tmp_path, monkeypatch):
+    models, routes, _, owner = seed(tmp_path, monkeypatch)
+    models._save_session_draft(owner.session_id, {'text': 'old draft'})
+    waiting, resume = threading.Event(), threading.Event()
+    real_lock = routes._draft_lifecycle_lock_for_session_id
+    responses, errors = {}, []
+
+    @contextmanager
+    def delayed_lock(sid):
+        if threading.current_thread().name == 'late-draft':
+            waiting.set()
+            assert resume.wait(5)
+        with real_lock(sid):
+            yield
+
+    monkeypatch.setattr(routes, '_draft_lifecycle_lock_for_session_id', delayed_lock)
+    monkeypatch.setattr(routes, '_check_csrf', lambda h: True)
+    monkeypatch.setattr(routes, 'read_body', lambda h: {'session_id': owner.session_id, 'text': 'late'})
+    monkeypatch.setattr(routes, '_lookup_cli_session_metadata', lambda sid: {})
+    monkeypatch.setattr(routes, '_worktree_retained_payload_for_session_id', lambda sid: {})
+    monkeypatch.setattr(routes, '_is_messaging_session_id', lambda sid: False)
+    monkeypatch.setattr(routes, '_session_is_subagent_view_only', lambda sid: False)
+    def respond(h, payload, status=200, **kw):
+        responses[threading.current_thread().name] = (status, payload)
+        return True
+    monkeypatch.setattr(routes, 'j', respond)
+    monkeypatch.setattr(routes, 'bad', lambda h, message, status=400: respond(h, {'error': message}, status))
+    handler = SimpleNamespace(command='POST')
+    def save():
+        try:
+            routes.handle_post(handler, urlparse('/api/session/draft'))
+        except BaseException as exc:
+            errors.append(exc)
+    thread = threading.Thread(target=save, name='late-draft')
+    thread.start()
+    assert waiting.wait(3)
+    try:
+        assert routes.handle_post(handler, urlparse('/api/session/delete')) is True
+    finally:
+        resume.set()
+        thread.join(5)
+    assert not thread.is_alive() and not errors
+    assert responses['late-draft'][0] == 409
+    assert not owner.path.exists() and not models._session_draft_path(owner.session_id).exists()

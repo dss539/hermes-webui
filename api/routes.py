@@ -18383,8 +18383,10 @@ def handle_post(handler, parsed) -> bool:
             sid = query.get("session_id", [""])[0] if parsed.query else ""
             if not sid:
                 return bad(handler, "session_id is required", 400)
+            if not is_safe_session_id(sid):
+                return bad(handler, "Invalid session_id", 400)
             try:
-                s = get_session(sid)
+                s = get_session_for_draft(sid)
             except KeyError:
                 return bad(handler, "Session not found", 404)
             draft = getattr(s, "composer_draft", {}) or {}
@@ -18395,6 +18397,8 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session_id", 400)
         if _is_subagent_child_session_id(sid):
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
@@ -26037,7 +26041,8 @@ def _handle_background(handler, body):
             # clutter the sidebar or SESSION_DIR. The index is pruned on the
             # next rebuild via _index_entry_exists().
             try:
-                _remove_session_with_draft(SESSION_DIR / f"{bg_sid}.json")
+                with _get_session_agent_lock(bg_sid):
+                    _remove_session_with_draft(SESSION_DIR / f"{bg_sid}.json")
             except Exception:
                 pass
         except Exception:
