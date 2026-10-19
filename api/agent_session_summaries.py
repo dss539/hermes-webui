@@ -9,7 +9,6 @@ from collections import Counter, OrderedDict
 from contextlib import closing, contextmanager
 import json
 import logging
-import math
 import os
 from pathlib import Path
 import sqlite3
@@ -51,23 +50,7 @@ def _fact_key(row):
     if row is None:
         return None
     # Python equates 1 and 1.0 (and +0.0/-0.0), while the wire contract does not.
-    # Keep values and types in separate tuples: map(type, ...) runs in C and
-    # avoids one Python allocation per column on every component-cache lookup.
-    return (tuple(row), tuple(map(type, row)),
-            tuple(value.hex() for value in row if isinstance(value, float)))
-
-
-def _facts_equal(left, right):
-    # Native tuple comparison rejects changed values without allocating typed
-    # copies. Equal numeric values still need their storage type and zero sign.
-    if left != right:
-        return False
-    if left is None:
-        return True
-    return all(type(a) is type(b) and
-               (type(a) is not float or a != 0 or
-                math.copysign(1, a) == math.copysign(1, b))
-               for a, b in zip(left, right))
+    return tuple((type(value), value.hex() if isinstance(value, float) else value) for value in row)
 
 
 def counters():
@@ -197,15 +180,14 @@ class _Reader:
             stats = {}
             if self.message_shape:
                 stats = dict((row[0], row[1:]) for row in source.execute(
-                    "SELECT session_id, COUNT(*), COUNT(*) FILTER (WHERE role='user' OR "
-                    "(role!='assistant' AND LOWER(role)='user')), MAX(timestamp) "
+                    "SELECT session_id, COUNT(id), COUNT(CASE WHEN LOWER(role)='user' THEN 1 END), MAX(timestamp) "
                     'FROM messages GROUP BY session_id') if row[0] in rows)
             # No hashes or latest-message assumptions. Equality of the exact
             # relevant facts, not identity of individual transcript rows, is the
             # requirement. Content titles use the original SQL on this snapshot.
             changed = {sid for sid in self.rows.keys() | rows.keys()
-                       if not _facts_equal(self.rows.get(sid), rows.get(sid))
-                       or not _facts_equal(self.stats.get(sid), stats.get(sid))}
+                       if _fact_key(self.rows.get(sid)) != _fact_key(rows.get(sid))
+                       or _fact_key(self.stats.get(sid)) != _fact_key(stats.get(sid))}
             source_position = self.columns.index('source') + 1
             def watched(row):
                 return row is not None and row[source_position] is not None and row[source_position] not in ('cron', 'webui')

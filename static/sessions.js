@@ -7920,10 +7920,7 @@ function _formatSessionDate(timestampMs, nowMs) {
   const now = new Date(nowMs);
   const options = {month:'short', day:'numeric'};
   if (date.getFullYear() !== now.getFullYear()) options.year = 'numeric';
-  if (Number.isNaN(date.getTime()) || typeof _intlFormatter !== 'function') {
-    return date.toLocaleDateString(undefined, options);
-  }
-  return _intlFormatter(undefined, options).format(date);
+  return date.toLocaleDateString(undefined, options);
 }
 
 function _formatRelativeSessionTime(timestampMs, nowMs) {
@@ -8062,7 +8059,6 @@ function _clearLineageReportCache(){
 }
 
 function _pruneLineageReportCacheToVisibleSessions(sessions){
-  if(!_lineageReportCache.size && !_lineageReportInflight.size) return;
   const visibleKeys=new Set();
   const rows=Array.isArray(sessions)?sessions:[];
   for(const s of rows){

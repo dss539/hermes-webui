@@ -38,11 +38,6 @@ class _Store:
     def __init__(self, directory):
         self.path = directory / '_sidebar.db'
         self.conn = sqlite3.connect(self.path, timeout=.05, check_same_thread=False)
-        # Only this disposable WebUI derivative is writable. WAL/NORMAL keeps
-        # atomic cache commits without fsyncing every metadata image; canonical
-        # JSON is still validated and rebuilds the derivative after cache loss.
-        self.conn.execute('PRAGMA journal_mode=WAL')
-        self.conn.execute('PRAGMA synchronous=NORMAL')
         self.conn.executescript('''
             CREATE TABLE IF NOT EXISTS meta (singleton INTEGER PRIMARY KEY, format_version INTEGER, revision INTEGER, index_signature TEXT,
                 epoch TEXT, floor_revision INTEGER NOT NULL DEFAULT 0, ready INTEGER NOT NULL DEFAULT 0, namespace_signature TEXT);
