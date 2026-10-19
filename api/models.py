@@ -9147,15 +9147,11 @@ def _sqlite_file_stat_cache_key(db_path: Path):
     test) with the cheap file stat stamps as a belt-and-suspenders fallback for
     the case where the fingerprint can't be read.
     """
-    from api.sidebar_revision import sqlite_revision, profile_revision
-
     return (
         _sqlite_content_fingerprint(db_path),
         _path_stat_cache_key(db_path),
         _path_stat_cache_key(Path(f"{db_path}-wal")),
         _path_stat_cache_key(Path(f"{db_path}-shm")),
-        sqlite_revision(db_path),
-        profile_revision(Path(db_path).parent),
     )
 
 
@@ -9242,8 +9238,6 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
         _path_stat_cache_key(projects_dir),
         _path_stat_cache_key(SESSION_INDEX_FILE),
     )
-    from api.sidebar_revision import webui_revision
-    cache_key += (webui_revision(SESSION_DIR, PROJECTS_FILE),)
     return hermes_home, db_path, cli_profile, cache_key
 
 
@@ -9530,21 +9524,6 @@ def _load_cli_sessions_uncached(
             return _webhook_pid()
         return None
 
-    # Pure state.db sessions have no WebUI sidecar. Enumerate the sidecar
-    # namespace once instead of paying thousands of failed stat() calls. The
-    # outer projection's before/after source stamp fences concurrent additions;
-    # existing files still use the per-file metadata cache and its stat checks.
-    try:
-        with os.scandir(SESSION_DIR) as entries:
-            sidecar_ids = {e.name[:-5] for e in entries if e.name.endswith('.json')}
-    except OSError:
-        sidecar_ids = None
-
-    def _projection_metadata(sid):
-        if sidecar_ids is not None and sid not in sidecar_ids:
-            return {}
-        return _state_projection_sidecar_metadata(sid)
-
     # Sidecar-carried assignments, memoized per sid for this scan.
     # _state_projection_sidecar_metadata is already stat-cached, but
     # _interactive_row_project_id is called several times per row (budget
@@ -9553,7 +9532,7 @@ def _load_cli_sessions_uncached(
     _sidecar_pid_cache: dict[str, str | None] = {}
     def _sidecar_row_project_id(sid: str) -> str | None:
         if sid not in _sidecar_pid_cache:
-            _sidecar_pid_cache[sid] = _projection_metadata(sid).get('project_id')
+            _sidecar_pid_cache[sid] = _state_projection_sidecar_metadata(sid).get('project_id')
         return _sidecar_pid_cache[sid]
 
     def _interactive_row_project_id(row: dict) -> str | None:
@@ -10184,7 +10163,7 @@ def _load_cli_sessions_uncached(
         # the state.db projection. This keeps archived cron/tool/API runs hidden
         # even when all_sessions() omits the hidden sidecar and the state row is
         # re-injected from Hermes state.db (#4397).
-        _sidecar_meta = _projection_metadata(sid)
+        _sidecar_meta = _state_projection_sidecar_metadata(sid)
         if _sidecar_meta.get('title'):
             _title = _sidecar_meta['title']
         if _sidecar_meta.get('archived') is not None:
@@ -10274,7 +10253,7 @@ def _load_cli_sessions_uncached(
                 if not _title:
                     # Friendly cron job name from the once-parsed jobs.json map.
                     _title = _cron_title_from_jobs(sid) or _title
-                _sidecar_meta = _projection_metadata(sid)
+                _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
                 if _sidecar_meta.get('archived') is not None:
@@ -10343,7 +10322,7 @@ def _load_cli_sessions_uncached(
                 _source_meta = normalize_agent_session_source(_source)
                 raw_ts = row['last_activity'] or row['started_at']
                 _title = row['title']
-                _sidecar_meta = _projection_metadata(sid)
+                _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
                 if _sidecar_meta.get('archived') is not None:
@@ -10411,7 +10390,7 @@ def _load_cli_sessions_uncached(
                 _source_meta = normalize_agent_session_source(_source)
                 raw_ts = row['last_activity'] or row['started_at']
                 _title = row['title']
-                _sidecar_meta = _projection_metadata(sid)
+                _sidecar_meta = _state_projection_sidecar_metadata(sid)
                 if _sidecar_meta.get('title'):
                     _title = _sidecar_meta['title']
                 if _sidecar_meta.get('archived') is not None:
@@ -10473,8 +10452,6 @@ def get_cli_sessions(
     bridge is purely additive and never crashes the WebUI.
     """
     source_filter = _normalize_cli_session_source_filter(source_filter)
-    from api.sidebar_revision import webui_revision
-
     contexts = []
     if all_profiles:
         contexts, context_cache_key = _all_profiles_cli_contexts()
@@ -10498,7 +10475,6 @@ def get_cli_sessions(
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(SESSION_INDEX_FILE),
-            webui_revision(SESSION_DIR, PROJECTS_FILE),
         )
     else:
         resolve_kwargs = {}

@@ -6651,18 +6651,6 @@ async function _loadSidebarSessionListPayload(sessionListQS, sessionRequestOpts)
 async function _drainRenderSessionListQueue(initialRequest){
   let request=initialRequest;
   try{
-    // Visibility/focus listeners run synchronously in a burst. Merge that
-    // burst before issuing HTTP, rather than invalidating an already-started
-    // response and then fetching the identical scope again. Calls arriving
-    // after dispatch still invalidate/queue normally (newest response wins).
-    await Promise.resolve();
-    if(_renderSessionListQueuedRequest){
-      request={
-        opts:_mergeRenderSessionListOptions(request.opts, _renderSessionListQueuedRequest.opts),
-        gen:_renderSessionListQueuedRequest.gen,
-      };
-      _renderSessionListQueuedRequest=null;
-    }
     while(request){
       await _runRenderSessionListRefresh(request.opts, request.gen);
       request=_renderSessionListQueuedRequest;

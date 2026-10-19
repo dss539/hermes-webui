@@ -422,14 +422,11 @@ def _session_list_cache_set(
     payload: dict,
     *,
     expected_invalidation_stamp: tuple[int, int] | None = None,
-    expected_source_stamp=None,
 ) -> bool:
     if not isinstance(payload, dict):
         return False
-    bounded = _session_list_cache_bounded_payload(payload)
     stamp = _session_list_cache_resolved_source_stamp(key)
-    if expected_source_stamp is not None and stamp != expected_source_stamp:
-        return False
+    bounded = _session_list_cache_bounded_payload(payload)
     with _SESSIONS_CACHE_LOCK:
         # Projection intentionally happens outside the lock so large source rows
         # cannot block cache hits. Re-check the caller's pre-build generation
@@ -564,7 +561,7 @@ def _session_list_cache_state_db_fingerprint_impl(state_db_path: Path | None):
         return None
 
 
-def _session_list_cache_source_stamp(key: tuple) -> tuple:
+def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], object, int]:
     _cache_profile, _cache_all_profiles, _cache_show_cli_sessions, *_rest = key
     try:
         swv = _session_list_cache_settings_write_version()
@@ -611,9 +608,6 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple:
         session_index_path = _session_list_cache_session_dir() / "_index.json"
     except Exception:
         session_index_path = None
-    from api.sidebar_revision import sqlite_revision, webui_revision, profile_revision
-    from api.models import PROJECTS_FILE
-
     all_profiles_state_stamp = None
     if _cache_all_profiles:
         try:
@@ -623,10 +617,7 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple:
                 (
                     _session_list_cache_path_stamp(ctx_db),
                     _session_list_cache_path_stamp(ctx_db.with_name(f"{ctx_db.name}-wal") if ctx_db else None),
-                    str(ctx_db),
                     _session_list_cache_state_db_fingerprint(ctx_db),
-                    sqlite_revision(ctx_db),
-                    profile_revision(_home),
                 )
                 for _home, ctx_db, _prof in contexts
             )
@@ -646,9 +637,6 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple:
         _session_list_cache_state_db_fingerprint(state_db_path),
         all_profiles_state_stamp,
         swv,
-        sqlite_revision(state_db_path) if state_db_path is not None else None,
-        webui_revision(_session_list_cache_session_dir(), PROJECTS_FILE),
-        profile_revision(state_db_path.parent) if state_db_path is not None else None,
     )
 
 
