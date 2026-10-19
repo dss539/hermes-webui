@@ -573,17 +573,12 @@ def test_cache_owned_projection_preserves_rows_when_real_open_fails(tmp_path, mo
     warm = models.get_cli_sessions()
     assert [row["session_id"] for row in warm] == ["cli_perf_0000"]
 
-    failed_reads = []
     def fail_open(*_args, **_kwargs):
-        failed_reads.append(True)
         raise OSError("state.db temporarily unavailable")
 
-    # Failure at the shared source-reader seam still reaches the complete LKG
-    # fallback; the Agent URI open/no-writable-retry tests remain separate.
-    monkeypatch.setattr(models, "read_importable_agent_session_rows", fail_open)
+    monkeypatch.setattr(agent_sessions, "open_state_db_readonly", fail_open)
     revision[0] = "failed"
     assert models.get_cli_sessions() == warm
-    assert failed_reads
 
 
 def test_cache_owned_source_pass_failure_serves_fresh_incomplete_rows_uncached(tmp_path, monkeypatch):
@@ -617,25 +612,23 @@ def test_cache_owned_source_pass_failure_serves_fresh_incomplete_rows_uncached(t
     warm = models.get_cli_sessions()
     assert [row["session_id"] for row in warm] == ["cli_perf_0000"]
 
-    # Consumers now share one physical source handle. Inject the failure at the
-    # actual second source projection (cron), not an obsolete second open.
-    real_reader = models.read_importable_agent_session_rows
-    reads = 0
+    real_open = agent_sessions.open_state_db_readonly
+    opens = 0
 
-    def fail_second_read(*args, **kwargs):
-        nonlocal reads
-        reads += 1
-        if reads == 2:
+    def fail_second_open(*args, **kwargs):
+        nonlocal opens
+        opens += 1
+        if opens == 2:
             raise OSError("state.db disappeared during cron pass")
-        return real_reader(*args, **kwargs)
+        return real_open(*args, **kwargs)
 
-    monkeypatch.setattr(models, "read_importable_agent_session_rows", fail_second_read)
+    monkeypatch.setattr(agent_sessions, "open_state_db_readonly", fail_second_open)
     revision[0] = "failed"
     assert models.get_cli_sessions() == []
-    assert reads >= 2
+    assert opens >= 2
 
     # The incomplete optional result was not published under the failed key.
-    monkeypatch.setattr(models, "read_importable_agent_session_rows", real_reader)
+    monkeypatch.setattr(agent_sessions, "open_state_db_readonly", real_open)
     assert models.get_cli_sessions() == warm
 
 

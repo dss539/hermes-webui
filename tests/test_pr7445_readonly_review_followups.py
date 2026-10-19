@@ -83,16 +83,6 @@ def _capture_listing_sql(monkeypatch):
     """Record the SQL statements the listing runs (trace callback, read-only)."""
     statements = []
     real_connect = sqlite3.connect
-    # These assertions pin the still-supported legacy source SQL plan. The
-    # summary path has no raw candidate-message query; its readonly/one-scan
-    # and indexed/unindexed equivalence gates live in the summary regressions.
-    from contextlib import contextmanager
-    from api import agent_session_summaries
-    @contextmanager
-    def legacy_reader(path):
-        with closing(agent_sessions.open_state_db_readonly(path)) as conn:
-            yield conn
-    monkeypatch.setattr(agent_session_summaries, 'summary_connection', legacy_reader)
 
     def tracing_connect(*args, **kwargs):
         conn = real_connect(*args, **kwargs)

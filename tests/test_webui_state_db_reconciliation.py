@@ -316,15 +316,6 @@ def test_sidebar_override_reader_uses_one_connection_and_500_id_chunks(
         connection.set_trace_callback(trace)
         return connection
 
-    # Instrument the shared-reader seam for these intentionally legacy minimal
-    # schemas; retain all connection-close, chunk-size and rich-failure checks.
-    from contextlib import closing, contextmanager
-    from api import agent_session_summaries
-    @contextmanager
-    def tracked_summary(path):
-        with closing(tracked_open(path)) as connection:
-            yield connection
-    monkeypatch.setattr(agent_session_summaries, 'summary_connection', tracked_summary)
     monkeypatch.setattr(models, "open_state_db_readonly", tracked_open)
     overrides = models._read_state_db_sidebar_overrides(db_path, set(session_ids))
 
@@ -403,15 +394,6 @@ def test_sidebar_override_reader_recovers_sources_after_rich_reader_error(
         connection.set_trace_callback(trace)
         return connection
 
-    # Instrument the shared-reader seam for these intentionally legacy minimal
-    # schemas; retain all connection-close, chunk-size and rich-failure checks.
-    from contextlib import closing, contextmanager
-    from api import agent_session_summaries
-    @contextmanager
-    def tracked_summary(path):
-        with closing(tracked_open(path)) as connection:
-            yield connection
-    monkeypatch.setattr(agent_session_summaries, 'summary_connection', tracked_summary)
     monkeypatch.setattr(models, "open_state_db_readonly", tracked_open)
     overrides = models._read_state_db_sidebar_overrides(db_path, set(session_ids))
 

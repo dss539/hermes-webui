@@ -72,9 +72,6 @@ def test_does_not_full_scan_sessions_table(tmp_path, monkeypatch):
     class _TrackingConn:
         def __init__(self, *args, **kw):
             self._real = real_connect(*args, **kw)
-        def __getattr__(self, name):
-            # Transparent for persistent source and WebUI summary connections.
-            return getattr(self._real, name)
         def cursor(self):
             return _TrackingCursor(self._real.cursor())
         def __enter__(self):
@@ -243,9 +240,6 @@ def test_in_clause_chunked_for_large_session_set(tmp_path, monkeypatch):
     class _TrackingConn:
         def __init__(self, *args, **kw):
             self._real = real_connect(*args, **kw)
-        def __getattr__(self, name):
-            # Transparent for persistent source and WebUI summary connections.
-            return getattr(self._real, name)
         def cursor(self):
             return _TrackingCursor(self._real.cursor())
         def __enter__(self): return self
