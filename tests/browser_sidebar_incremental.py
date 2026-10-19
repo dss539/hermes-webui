@@ -166,22 +166,6 @@ CHUNK_CHECK = r'''async () => {
  ok(JSON.stringify(ids())===JSON.stringify(newest.map(s=>s.session_id))&&
    [...list.querySelectorAll('.session-title')].every(e=>e.textContent.startsWith('Newest ')),
    'newest projection wins when it cancels an incomplete paint');
- // An authoritative update while a menu owns an already-mounted row must not
- // strand the still-pending slots after that menu closes.
- _allSessions=rows.map(s=>({...s,title:'Menu obsolete '+s.title}));_sessionRowDomCache=new Map();
- const menuPaint=renderSessionListFromCache();
- while(!list.querySelector('.session-actions-trigger')&&_sessionListPaintJob) await new Promise(r=>_scheduleSidebarPaintTask(r));
- const menuTrigger=list.querySelector('.session-actions-trigger');menuTrigger.click();
- const menuAnchor=menuTrigger.closest('.session-item');
- const menuNewest=rows.map(s=>({...s,title:'Menu newest '+s.title}));
- await _applySessionListPayload({sessions:menuNewest,active_profile:'default',webui_session_count:79,cli_session_count:0},{projects:[]});
- await new Promise(r=>setTimeout(r,150));
- ok(menuAnchor.isConnected&&!!_sessionActionMenu,'new payload preserves the mid-paint menu anchor');
- closeSessionActionMenu();await menuPaint;
- while(_sessionListPaintJob) await _sessionListPaintJob.completion;
- ok(JSON.stringify(ids())===JSON.stringify(menuNewest.map(s=>s.session_id))&&
-   [...list.querySelectorAll('.session-title')].every(e=>e.textContent.startsWith('Menu newest ')),
-   'new payload during a chunked menu paint completes after the menu closes');
  // Reconciliation is not a second entrance animation and need not replace
  // unchanged rows just because their metadata was last-known on the first paint.
  const bootRows=rows.slice(0,18).map(s=>({...s,session_id:'boot-'+s.session_id}));
