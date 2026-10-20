@@ -1,5 +1,5 @@
 """Exercise the real Windows replace retry branch without a Windows host."""
-from tests.test_composer_draft_profile_races import env
+from tests.test_composer_draft_profile_races import env as env
 import json
 import threading
 

@@ -34,8 +34,13 @@ owner's profile never becomes the request's authority.
 
 The resolver retains the exact durable owner's inode/size/mtime/ctime revision.
 Draft writes prepare and fsync an independent temporary file, then compare that
-revision and replace the draft under a short owner-publication lock shared with
-both indexed and skip-index Session saves. Revision churn retries the complete
+revision and replace the draft under a short owner-publication gate used by
+both indexed and skip-index Session saves. Owner replacements hold shared mode
+and can overlap one another. Draft compare/replace, first-shell compare/create,
+cooperative owner unlink and joint revision validation hold exclusive mode.
+Waiting exclusive operations stop new shared admissions, so checkpoints cannot
+starve a pending draft publication. Modes are never nested or upgraded.
+Revision churn retries the complete
 owner resolution and draft projection at most four times, using the same captured
 profile and SID. A foreign owner, lost authority, or exhausted budget returns a
 generic 409 without publishing. GET validates its read revision before returning;

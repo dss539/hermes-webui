@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from tests.test_composer_draft_profile_races import env, PRIVATE
+from tests.test_composer_draft_profile_races import PRIVATE, env as env
 
 
 def test_first_shell_does_not_replace_new_foreign_owner(env, monkeypatch):

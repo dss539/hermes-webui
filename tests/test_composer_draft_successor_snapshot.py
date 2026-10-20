@@ -1,5 +1,5 @@
 """A multi-owner authorization must have a single consistent publication view."""
-from tests.test_composer_draft_profile_races import env
+from tests.test_composer_draft_profile_races import env as env
 import json
 import pytest
 

@@ -303,15 +303,59 @@ def _sidecar_write_generation(session_id) -> tuple[int, int]:
     return total, own
 
 
-# Serialize only owner/draft publication, never transcript or draft preparation.
-# Session.save may already own the index lock; nothing below takes that lock,
-# the agent lock, or a draft lifecycle lock while owning this publication lock.
-_DRAFT_OWNER_PUBLICATION_LOCK = threading.Lock()
+class _DraftOwnerPublicationGate:
+    """Concurrent owner replacements; exclusive draft/creation decisions.
+
+    Waiting exclusive publishers stop new shared admissions so a stream of
+    checkpoints cannot starve a draft commit. Never nest or upgrade modes.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition(threading.Lock())
+        self._owners = 0
+        self._exclusive = False
+        self._waiting_exclusive = 0
+
+    @contextmanager
+    def shared(self):
+        with self._condition:
+            self._condition.wait_for(lambda: not self._exclusive and not self._waiting_exclusive)
+            self._owners += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._owners -= 1
+                if not self._owners:
+                    self._condition.notify_all()
+
+    @contextmanager
+    def exclusive(self):
+        with self._condition:
+            self._waiting_exclusive += 1
+            try:
+                self._condition.wait_for(lambda: not self._exclusive and not self._owners)
+                self._exclusive = True
+            finally:
+                self._waiting_exclusive -= 1
+                self._condition.notify_all()
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._exclusive = False
+                self._condition.notify_all()
+
+
+# Only publication, never preparation/backoff. Callers may own index/lifecycle
+# locks; gate holders must not acquire either, nor cache or agent locks.
+_DRAFT_OWNER_PUBLICATION_GATE = _DraftOwnerPublicationGate()
 
 
 def _replace_session_sidecar(tmp: Path, path: Path, session_id, *, only_if_absent=False):
     def publish(src, dst):
-        with _DRAFT_OWNER_PUBLICATION_LOCK:
+        gate = _DRAFT_OWNER_PUBLICATION_GATE
+        with gate.exclusive() if only_if_absent else gate.shared():
             if only_if_absent and _draft_owner_revision(session_id) is not None:
                 return False
             _note_sidecar_write(session_id)
@@ -332,7 +376,7 @@ def _draft_owner_revision(session_id):
 
 def _draft_owner_revisions_are_current(revisions):
     """Validate the complete bounded authorization read set at one boundary."""
-    with _DRAFT_OWNER_PUBLICATION_LOCK:
+    with _DRAFT_OWNER_PUBLICATION_GATE.exclusive():
         return all(_draft_owner_revision(sid) == revision for sid, revision in revisions)
 
 
@@ -468,7 +512,7 @@ def _save_session_draft(session_id: str, draft, *, owner=None) -> bool:
             # An owner save can complete during any of that work; compare again
             # and replace atomically with respect to both Session.save modes.
             def publish(src, dst):
-                with _DRAFT_OWNER_PUBLICATION_LOCK:
+                with _DRAFT_OWNER_PUBLICATION_GATE.exclusive():
                     revision = _draft_owner_revision(sid)
                     if revision is None:
                         # A never-persisted empty chat stays diskless. A deleted
@@ -527,7 +571,7 @@ def _remove_session_with_draft(path) -> bool:
     """Remove an owner and its draft under the same lifecycle lock."""
     path = Path(path)
     with _draft_lifecycle_lock_for_session_id(path.stem):
-        with _DRAFT_OWNER_PUBLICATION_LOCK:
+        with _DRAFT_OWNER_PUBLICATION_GATE.exclusive():
             path.unlink(missing_ok=True)
         return _delete_session_draft_by_dir(path.stem, path.parent)
 

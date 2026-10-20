@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from tests.test_composer_draft_profile_races import env
+from tests.test_composer_draft_profile_races import env as env
 
 
 def test_same_profile_revision_churn_is_bounded(env, monkeypatch):
