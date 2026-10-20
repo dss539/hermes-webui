@@ -1620,11 +1620,11 @@ def test_autosave_and_delete_lock_step_does_not_recreate_draft(tmp_path, monkeyp
     original_safe_replace = models._safe_replace
     replace_error = {}
 
-    def slow_safe_replace(src, dst):
+    def slow_safe_replace(src, dst, **kwargs):
         saved_to_replace.set()
         allow_replace.wait()
         try:
-            return original_safe_replace(src, dst)
+            return original_safe_replace(src, dst, **kwargs)
         except Exception as exc:
             replace_error["error"] = exc
             raise

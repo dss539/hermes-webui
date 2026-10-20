@@ -274,7 +274,7 @@ def test_owner_compare_and_draft_replace_exclude_owner_publication(env, monkeypa
     caller = threading.current_thread()
     real_revision = e.m._draft_owner_revision
     real_publish = e.m._replace_session_sidecar
-    real_replace = e.m._safe_replace
+    real_replace = e.m.os.replace
 
     def publisher():
         try:
@@ -305,7 +305,7 @@ def test_owner_compare_and_draft_replace_exclude_owner_publication(env, monkeypa
 
     monkeypatch.setattr(e.m, '_draft_owner_revision', compare)
     monkeypatch.setattr(e.m, '_replace_session_sidecar', publish)
-    monkeypatch.setattr(e.m, '_safe_replace', replace)
+    monkeypatch.setattr(e.m.os, 'replace', replace)
     thread = threading.Thread(target=publisher)
     thread.start()
     try:

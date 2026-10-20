@@ -12168,6 +12168,8 @@ from api.models import (
     get_session_for_draft,
     _draft_lifecycle_lock_for_session_id,
     _draft_owner_is_current,
+    _draft_owner_revision,
+    _draft_owner_revisions_are_current,
     _remove_session_with_draft,
     get_session_profile_readonly,
     get_session_for_scan,
@@ -12411,11 +12413,14 @@ def _pre_compression_continuation_session_id(session) -> str | None:
     return _resolve_from_rows(rows)
 
 
-def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile) -> bool:
-    """Confirm one bounded compression edge from current on-disk metadata."""
+def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile, *, revisions=None) -> bool:
+    """Read an edge optimistically, retaining every revision before its read."""
+    observed = [] if revisions is None else revisions
+    observed.append((snapshot_sid, _draft_owner_revision(snapshot_sid)))
     snapshot_meta = _persisted_session_meta_prefix(snapshot_sid)
+    observed.append((continuation_sid, _draft_owner_revision(continuation_sid)))
     continuation_meta = _persisted_session_meta_prefix(continuation_sid)
-    return bool(
+    authorized = bool(
         snapshot_meta
         and continuation_meta
         and _profiles_match(snapshot_meta.get("profile"), request_profile)
@@ -12425,6 +12430,7 @@ def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, reques
         and _profiles_match(continuation_meta.get("profile"), request_profile)
         and _safe_first(continuation_meta.get("parent_session_id")) == snapshot_sid
     )
+    return authorized and (revisions is not None or _draft_owner_revisions_are_current(observed))
 
 
 def _draft_pre_compression_continuation_session_authority(
@@ -12479,11 +12485,15 @@ def _draft_pre_compression_continuation_session_authority(
 
 
 def _draft_compression_edges_still_authorized(edges, request_profile) -> bool:
-    """Recheck each bounded lineage edge after acquiring the final target lock."""
-    return all(
-        _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile)
+    """Scan outside the lock, then validate all edge records together."""
+    revisions = []
+    authorized = all(
+        _draft_compression_edge_is_authorized(
+            snapshot_sid, continuation_sid, request_profile, revisions=revisions,
+        )
         for snapshot_sid, continuation_sid in edges
     )
+    return authorized and _draft_owner_revisions_are_current(revisions)
 
 from api.workspace import (
     load_workspaces,
@@ -18597,9 +18607,12 @@ def handle_post(handler, parsed) -> bool:
                 resolved_sid = str(getattr(request_session, "session_id", "") or "").strip()
                 if not resolved_sid or not is_safe_session_id(resolved_sid):
                     return _draft_authority_unconfirmed()
-                if (not _profiles_match(getattr(request_session, "profile", None), request_profile)
-                        or not _draft_owner_is_current(request_session)):
+                if not _profiles_match(getattr(request_session, "profile", None), request_profile):
                     return _draft_authority_unconfirmed()
+                if not _draft_owner_is_current(request_session):
+                    # Same SID and captured profile on every bounded retry.
+                    # Re-read the draft too, preserving compare/clear semantics.
+                    continue
 
                 if resolved_sid != authoritative_sid:
                     if resolved_sid in _seen_authority_sids:
@@ -18666,7 +18679,7 @@ def handle_post(handler, parsed) -> bool:
                     or (isinstance(if_files, list) and list(current_draft.get("files") or []) != if_files)
                 ):
                     if not _draft_owner_is_current(request_session):
-                        return _draft_authority_unconfirmed()
+                        continue
                     return j(handler, {"ok": True, "draft": current_draft, "unchanged": True, "mismatch": True})
                 next_draft = _project_session_draft_write(
                     {"text": text, "files": files, "goal_continuation_id": goal_continuation_id},
@@ -18674,7 +18687,7 @@ def handle_post(handler, parsed) -> bool:
                 )
                 if next_draft == current_draft:
                     if not _draft_owner_is_current(request_session):
-                        return _draft_authority_unconfirmed()
+                        continue
                     unchanged = True
                     saved_draft = current_draft
                 else:
@@ -18716,11 +18729,14 @@ def handle_post(handler, parsed) -> bool:
                                 draft_session.save(
                                     touch_updated_at=False,
                                     skip_index=True,
+                                    only_if_absent=True,
                                 )
-                                request_session._draft_identity_persisted = True
-                                request_session = get_session_for_draft(authoritative_sid)
-                                if not _profiles_match(request_session.profile, request_profile):
-                                    return _draft_authority_unconfirmed()
+                            # Success or collision proves this SID was durable.
+                            # Deletion before re-resolution must not recreate it.
+                            request_session._draft_identity_persisted = True
+                        # Whether we won or lost creation, re-resolve and project
+                        # from the durable owner; never overwrite the winner.
+                        continue
                     # Draft persistence is not conversation activity. Touching updated_at
                     # here makes the active-session external-refresh poll force-reload the
                     # current chat every few seconds while the user is typing, and that
@@ -18731,7 +18747,7 @@ def handle_post(handler, parsed) -> bool:
                         return _draft_authority_unconfirmed()
                     _draft_mark("before_save")
                     if _save_session_draft(authoritative_sid, next_draft, owner=request_session) is False:
-                        return _draft_authority_unconfirmed()
+                        continue
                     _draft_mark("after_save")
                     # Never assign back to a cached object that compression may
                     # have rebound while this fixed-identity write was in flight.

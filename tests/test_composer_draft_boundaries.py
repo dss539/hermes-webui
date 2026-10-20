@@ -52,7 +52,7 @@ def test_atomic_failure_keeps_previous_draft_and_removes_temporary_file(tmp_path
     models, routes, _, owner = seed(tmp_path, monkeypatch)
     models._save_session_draft(owner.session_id, {'text': 'durable'})
     before = models._session_draft_path(owner.session_id).read_bytes()
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise OSError('injected draft write failure')
     monkeypatch.setattr(models.os if failure == 'fsync' else models, failure, fail)
     with pytest.raises(OSError, match='injected draft write failure'):

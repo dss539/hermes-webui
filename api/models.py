@@ -243,17 +243,20 @@ _WINDOWS_REPLACE_MAX_RETRIES = 5
 _WINDOWS_REPLACE_INITIAL_DELAY = 0.05  # 50 ms
 
 
-def _safe_replace(src: Path, dst: Path) -> None:
-    """Atomic replace with retries on Windows file-locking errors."""
+def _safe_replace(src: Path, dst: Path, *, publish=None):
+    """Retry a single publication attempt; never retain its locks in backoff.
+
+    A guarded publisher compares and replaces under its lock on every attempt.
+    False means the condition no longer holds, not a Windows sharing violation.
+    """
+    replace = os.replace if publish is None else publish
     if os.name != 'nt':
-        os.replace(src, dst)
-        return
+        return replace(src, dst)
 
     delay = _WINDOWS_REPLACE_INITIAL_DELAY
     for attempt in range(_WINDOWS_REPLACE_MAX_RETRIES):
         try:
-            os.replace(src, dst)
-            return
+            return replace(src, dst)
         except PermissionError:
             if attempt == _WINDOWS_REPLACE_MAX_RETRIES - 1:
                 raise
@@ -306,13 +309,17 @@ def _sidecar_write_generation(session_id) -> tuple[int, int]:
 _DRAFT_OWNER_PUBLICATION_LOCK = threading.Lock()
 
 
-def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
-    with _DRAFT_OWNER_PUBLICATION_LOCK:
-        _note_sidecar_write(session_id)
-        try:
-            _safe_replace(tmp, path)
-        finally:
+def _replace_session_sidecar(tmp: Path, path: Path, session_id, *, only_if_absent=False):
+    def publish(src, dst):
+        with _DRAFT_OWNER_PUBLICATION_LOCK:
+            if only_if_absent and _draft_owner_revision(session_id) is not None:
+                return False
             _note_sidecar_write(session_id)
+            try:
+                os.replace(src, dst)
+            finally:
+                _note_sidecar_write(session_id)
+    return _safe_replace(tmp, path, publish=publish)
 
 
 def _draft_owner_revision(session_id):
@@ -323,10 +330,17 @@ def _draft_owner_revision(session_id):
     return (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
+def _draft_owner_revisions_are_current(revisions):
+    """Validate the complete bounded authorization read set at one boundary."""
+    with _DRAFT_OWNER_PUBLICATION_LOCK:
+        return all(_draft_owner_revision(sid) == revision for sid, revision in revisions)
+
+
 def _draft_owner_is_current(session):
     """Linearize a draft read against the revision used for authorization."""
-    with _DRAFT_OWNER_PUBLICATION_LOCK:
-        return _draft_owner_revision(session.session_id) == getattr(session, '_draft_owner_revision', None)
+    return _draft_owner_revisions_are_current([
+        (session.session_id, getattr(session, '_draft_owner_revision', None)),
+    ])
 
 
 _EMBEDDED_DRAFT_PUBLICATION_LOCK = threading.Lock()
@@ -453,17 +467,19 @@ def _save_session_draft(session_id: str, draft, *, owner=None) -> bool:
             # Encoding, writes and fsync stay outside the publication lock.
             # An owner save can complete during any of that work; compare again
             # and replace atomically with respect to both Session.save modes.
-            with _DRAFT_OWNER_PUBLICATION_LOCK:
-                revision = _draft_owner_revision(sid)
-                if revision is None:
-                    # A never-persisted new chat may acknowledge an empty draft
-                    # without creating either file. Deleted durable owners fail.
-                    return (owner is not None and not getattr(owner, '_draft_identity_persisted', False)
-                            and not payload.get('text') and not payload.get('files'))
-                if owner is not None and (owner.session_id != sid or revision != getattr(owner, '_draft_owner_revision', None)):
-                    return False
-                _safe_replace(tmp, path)
-            return True
+            def publish(src, dst):
+                with _DRAFT_OWNER_PUBLICATION_LOCK:
+                    revision = _draft_owner_revision(sid)
+                    if revision is None:
+                        # A never-persisted empty chat stays diskless. A deleted
+                        # durable owner must not regain that exception.
+                        return (owner is not None and not getattr(owner, '_draft_identity_persisted', False)
+                                and not payload.get('text') and not payload.get('files'))
+                    if owner is not None and (owner.session_id != sid or revision != getattr(owner, '_draft_owner_revision', None)):
+                        return False
+                    os.replace(src, dst)
+                    return True
+            return _safe_replace(tmp, path, publish=publish)
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
@@ -511,7 +527,8 @@ def _remove_session_with_draft(path) -> bool:
     """Remove an owner and its draft under the same lifecycle lock."""
     path = Path(path)
     with _draft_lifecycle_lock_for_session_id(path.stem):
-        path.unlink(missing_ok=True)
+        with _DRAFT_OWNER_PUBLICATION_LOCK:
+            path.unlink(missing_ok=True)
         return _delete_session_draft_by_dir(path.stem, path.parent)
 
 
@@ -1964,7 +1981,11 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(self, touch_updated_at: bool = True, skip_index: bool = False, *, only_if_absent: bool = False) -> bool | None:
+        # First-draft shells must not replace an owner published during fsync.
+        # Normal saves retain their existing return value and indexing behavior.
+        if only_if_absent and not skip_index:
+            raise ValueError('Create-only session publication requires skip_index')
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -2103,7 +2124,7 @@ class Session:
         # via /api/session/recover, sessions whose JSON has fewer messages than
         # their .bak get restored automatically.
         try:
-            if self.path.exists():
+            if not only_if_absent and self.path.exists():
                 # The on-disk count, without reading the body.
                 #
                 # The decision below is a function of ONE integer -- how many
@@ -2244,7 +2265,12 @@ class Session:
                 # Callers that explicitly skip the sidebar projection retain
                 # the existing same-session concurrency contract: their unique
                 # temp files may replace the sidecar independently.
-                _replace_session_sidecar(tmp, self.path, self.session_id)
+                if only_if_absent:
+                    if _replace_session_sidecar(tmp, self.path, self.session_id, only_if_absent=True) is False:
+                        tmp.unlink(missing_ok=True)
+                        return False
+                else:
+                    _replace_session_sidecar(tmp, self.path, self.session_id)
                 self._draft_identity_persisted = True
                 _publish_embedded_draft(self, published_stat, meta['composer_draft'])
             else:

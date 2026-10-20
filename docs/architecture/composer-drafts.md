@@ -35,14 +35,18 @@ owner's profile never becomes the request's authority.
 The resolver retains the exact durable owner's inode/size/mtime/ctime revision.
 Draft writes prepare and fsync an independent temporary file, then compare that
 revision and replace the draft under a short owner-publication lock shared with
-both indexed and skip-index Session saves. A changed owner returns the generic
-409 without publishing the draft. GET, unchanged and compare-mismatch responses
-also validate their read revision before returning. This is optimistic ordering:
-a save may complete while a draft is reading or fsyncing; it never waits for the
-draft lifecycle, transcript scan, encoding, fsync or HTTP response. The shared
-lock covers only stat/replace and the existing bounded Windows replace retries,
-not index updates or embedded-fallback publication. Missing durable owners fail
-closed; an empty draft for a never-persisted new chat remains a diskless no-op.
+both indexed and skip-index Session saves. Revision churn retries the complete
+owner resolution and draft projection at most four times, using the same captured
+profile and SID. A foreign owner, lost authority, or exhausted budget returns a
+generic 409 without publishing. GET validates its read revision before returning;
+POST unchanged and compare-mismatch results retry a changed revision too. This is
+optimistic ordering: a save may complete while a draft is reading or fsyncing;
+it never waits for the draft lifecycle, transcript scan, encoding, fsync or HTTP
+response. The shared lock covers stat/replace only, not index updates, embedded
+fallback publication, or Windows backoff. Each Windows replacement attempt
+reacquires the lock and revalidates its condition after sleeping outside it.
+Missing durable owners fail closed; an empty draft for a never-persisted new chat
+remains a diskless no-op.
 
 The ownership cache retains only eleven metadata fields and is bounded to 128
 file revisions. The path/inode/size/mtime/ctime key invalidates it on replacement
@@ -78,14 +82,20 @@ for session-like objects lacking that property.
 
 Snapshot-authority walks retain the transcript lock, bounded hops, durable
 profile/parent/continuation edge checks, target-lock revalidation, fail-closed
-responses, and `session_moved` replay contract. A snapshot discovered after
+responses, and `session_moved` replay contract. Every edge metadata read retains
+its prior file revision; the entire bounded read set is validated together under
+the publication lock before a redirect. Scans and HTTP output stay outside it.
+A snapshot discovered after
 ordinary preflight releases the draft lock before escalating to the transcript
 lock. Compression marker/publication and rollback hold the old identity's draft
 lifecycle lock, so an ordinary in-flight draft precedes the marker or observes
 its durable authority on recheck.
 
 First meaningful New Chat drafts still publish the small owner once under
-transcript -> draft -> cache lock ordering. An empty draft does not materialize
+transcript -> draft -> cache lock ordering. Encoding and fsync precede a locked
+compare-and-create: a competing owner is never overwritten. The route re-resolves
+and re-authorizes that durable SID before projecting the draft, whether creation
+won or collided. An empty draft does not materialize
 a shell. Successful saves/loads distinguish persisted owners from new shells;
 a deleted persisted owner cannot be recreated as an unsaved shell.
 
