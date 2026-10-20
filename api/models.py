@@ -306,8 +306,9 @@ def _sidecar_write_generation(session_id) -> tuple[int, int]:
 class _DraftOwnerPublicationGate:
     """Concurrent owner replacements; exclusive draft/creation decisions.
 
-    Waiting exclusive publishers stop new shared admissions so a stream of
-    checkpoints cannot starve a draft commit. Never nest or upgrade modes.
+    FIFO admission prevents either mode from overtaking queued work. Consecutive
+    shared tickets can overlap; an exclusive ticket waits for them to drain.
+    Never nest or upgrade modes.
     """
 
     def __init__(self):
@@ -315,11 +316,20 @@ class _DraftOwnerPublicationGate:
         self._owners = 0
         self._exclusive = False
         self._waiting_exclusive = 0
+        self._queue = collections.deque()
 
     @contextmanager
     def shared(self):
         with self._condition:
-            self._condition.wait_for(lambda: not self._exclusive and not self._waiting_exclusive)
+            ticket = object()
+            self._queue.append(ticket)
+            try:
+                self._condition.wait_for(lambda: not self._exclusive and self._queue[0] is ticket)
+            finally:
+                # Also remove interrupted waiters; wake the next shared ticket
+                # immediately so consecutive owners need not serialize bodies.
+                self._queue.remove(ticket)
+                self._condition.notify_all()
             self._owners += 1
         try:
             yield
@@ -332,11 +342,15 @@ class _DraftOwnerPublicationGate:
     @contextmanager
     def exclusive(self):
         with self._condition:
+            ticket = object()
+            self._queue.append(ticket)
             self._waiting_exclusive += 1
             try:
-                self._condition.wait_for(lambda: not self._exclusive and not self._owners)
+                self._condition.wait_for(
+                    lambda: not self._exclusive and not self._owners and self._queue[0] is ticket)
                 self._exclusive = True
             finally:
+                self._queue.remove(ticket)
                 self._waiting_exclusive -= 1
                 self._condition.notify_all()
         try:

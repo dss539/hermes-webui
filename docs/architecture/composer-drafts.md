@@ -38,8 +38,10 @@ revision and replace the draft under a short owner-publication gate used by
 both indexed and skip-index Session saves. Owner replacements hold shared mode
 and can overlap one another. Draft compare/replace, first-shell compare/create,
 cooperative owner unlink and joint revision validation hold exclusive mode.
-Waiting exclusive operations stop new shared admissions, so checkpoints cannot
-starve a pending draft publication. Modes are never nested or upgraded.
+Admission uses FIFO tickets, batching consecutive shared operations. Later
+arrivals cannot overtake either a waiting checkpoint or a waiting draft
+publication; exclusive tickets wait for all admitted owners to drain. Interrupted
+waiters remove their tickets and wake successors. Modes are never nested or upgraded.
 Revision churn retries the complete
 owner resolution and draft projection at most four times, using the same captured
 profile and SID. A foreign owner, lost authority, or exhausted budget returns a
