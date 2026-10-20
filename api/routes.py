@@ -1004,7 +1004,7 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     }
 
 
-def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True) -> bool:
+def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = True, request_profile=None) -> bool:
     """Return whether ``sid`` belongs to the active profile.
 
     On a profile mismatch, the helper mirrors the detail-load endpoint's
@@ -1026,7 +1026,9 @@ def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = T
         if emit_error:
             bad(handler, "Session not found", 404)
         return False
-    if not _session_visible_to_active_profile(session_profile, handler):
+    visible = (_session_visible_to_active_profile(session_profile, handler) if request_profile is None
+               else _profiles_match(session_profile, request_profile))
+    if not visible:
         if emit_error:
             if session_profile:
                 j(handler, {
@@ -1091,7 +1093,7 @@ def _stream_id_visible_to_request_profile(
     return _session_id_visible_to_request_profile(handler, owner_session_id, emit_error=emit_error)
 
 
-def _guard_request_session_visibility(handler, parsed, body=None, method="GET") -> bool:
+def _guard_request_session_visibility(handler, parsed, body=None, method="GET", *, request_profile=None) -> bool:
     """Apply request session-profile visibility check to request-supplied IDs.
 
     Covers top-level `session_id` in the query/body. Routes that accept session
@@ -1101,9 +1103,10 @@ def _guard_request_session_visibility(handler, parsed, body=None, method="GET") 
     if _request_session_visibility_exempt(method, getattr(parsed, "path", "")):
         return True
     sid = parse_qs(getattr(parsed, "query", "") or "").get("session_id", [None])[0]
-    if not _session_id_visible_to_request_profile(handler, sid):
+    authority = {"request_profile": request_profile} if request_profile is not None else {}
+    if not _session_id_visible_to_request_profile(handler, sid, **authority):
         return False
-    if isinstance(body, dict) and not _session_id_visible_to_request_profile(handler, body.get("session_id")):
+    if isinstance(body, dict) and not _session_id_visible_to_request_profile(handler, body.get("session_id"), **authority):
         return False
     return True
 
@@ -12164,6 +12167,7 @@ from api.models import (
     get_session,
     get_session_for_draft,
     _draft_lifecycle_lock_for_session_id,
+    _draft_owner_is_current,
     _remove_session_with_draft,
     get_session_profile_readonly,
     get_session_for_scan,
@@ -17538,6 +17542,8 @@ def _llm_update_summary(system_prompt: str, user_prompt: str, active_profile: st
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    # Cookie-less draft requests must also retain their entry-time authority.
+    request_profile = _get_active_profile_name() if parsed.path == "/api/session/draft" else None
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
     if parsed.path == "/api/csp-report":
         if diag:
@@ -17643,7 +17649,8 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
-    if not _guard_request_session_visibility(handler, parsed, body=body, method="POST"):
+    authority = {"request_profile": request_profile} if request_profile is not None else {}
+    if not _guard_request_session_visibility(handler, parsed, body=body, method="POST", **authority):
         if diag:
             diag.finish()
         return True
@@ -18454,8 +18461,6 @@ def handle_post(handler, parsed) -> bool:
         def _draft_mark(name):
             _draft_stages.append((name, _draft_time.monotonic()))
         _draft_mark("enter")
-        # Request authority must not be taken from a newly loaded session owner.
-        request_profile = _get_active_profile_name()
 
         def _draft_authority_unconfirmed():
             return j(
@@ -18483,6 +18488,8 @@ def handle_post(handler, parsed) -> bool:
                 if not _profiles_match(getattr(s, "profile", None), request_profile):
                     return _draft_authority_unconfirmed()
                 draft = getattr(s, "composer_draft", {}) or {}
+                if not _draft_owner_is_current(s):
+                    return _draft_authority_unconfirmed()
                 return j(handler, {"draft": draft})
         # POST
         try:
@@ -18590,7 +18597,8 @@ def handle_post(handler, parsed) -> bool:
                 resolved_sid = str(getattr(request_session, "session_id", "") or "").strip()
                 if not resolved_sid or not is_safe_session_id(resolved_sid):
                     return _draft_authority_unconfirmed()
-                if not _profiles_match(getattr(request_session, "profile", None), request_profile):
+                if (not _profiles_match(getattr(request_session, "profile", None), request_profile)
+                        or not _draft_owner_is_current(request_session)):
                     return _draft_authority_unconfirmed()
 
                 if resolved_sid != authoritative_sid:
@@ -18657,12 +18665,16 @@ def handle_post(handler, parsed) -> bool:
                     str(current_draft.get("text") or "") != if_text
                     or (isinstance(if_files, list) and list(current_draft.get("files") or []) != if_files)
                 ):
+                    if not _draft_owner_is_current(request_session):
+                        return _draft_authority_unconfirmed()
                     return j(handler, {"ok": True, "draft": current_draft, "unchanged": True, "mismatch": True})
                 next_draft = _project_session_draft_write(
                     {"text": text, "files": files, "goal_continuation_id": goal_continuation_id},
                     current_draft,
                 )
                 if next_draft == current_draft:
+                    if not _draft_owner_is_current(request_session):
+                        return _draft_authority_unconfirmed()
                     unchanged = True
                     saved_draft = current_draft
                 else:
@@ -18706,6 +18718,9 @@ def handle_post(handler, parsed) -> bool:
                                     skip_index=True,
                                 )
                                 request_session._draft_identity_persisted = True
+                                request_session = get_session_for_draft(authoritative_sid)
+                                if not _profiles_match(request_session.profile, request_profile):
+                                    return _draft_authority_unconfirmed()
                     # Draft persistence is not conversation activity. Touching updated_at
                     # here makes the active-session external-refresh poll force-reload the
                     # current chat every few seconds while the user is typing, and that
@@ -18715,7 +18730,8 @@ def handle_post(handler, parsed) -> bool:
                     ):
                         return _draft_authority_unconfirmed()
                     _draft_mark("before_save")
-                    _save_session_draft(authoritative_sid, next_draft)
+                    if _save_session_draft(authoritative_sid, next_draft, owner=request_session) is False:
+                        return _draft_authority_unconfirmed()
                     _draft_mark("after_save")
                     # Never assign back to a cached object that compression may
                     # have rebound while this fixed-identity write was in flight.

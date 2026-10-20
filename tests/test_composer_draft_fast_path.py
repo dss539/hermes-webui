@@ -36,12 +36,12 @@ def test_inflight_response_and_cached_property_keep_their_own_identity(tmp_path,
     before = models._session_draft_path(target.session_id).read_bytes()
     real_save = routes._save_session_draft
 
-    def rotate_during_write(write_sid, draft):
+    def rotate_during_write(write_sid, draft, **kw):
         assert write_sid == sid
         owner.session_id = target.session_id
         if permanent:
             owner._composer_draft_session_id = target.session_id
-        real_save(write_sid, draft)
+        return real_save(write_sid, draft, **kw)
 
     monkeypatch.setattr(routes, '_save_session_draft', rotate_during_write)
     try:
@@ -117,10 +117,10 @@ def test_cleanup_waits_for_draft_publication_before_removing_owner(tmp_path, mon
     real_save = routes._save_session_draft
     real_load = models.Session.load
 
-    def paused_save(sid, value):
+    def paused_save(sid, value, **kw):
         publishing.set()
         assert resume.wait(5)
-        return real_save(sid, value)
+        return real_save(sid, value, **kw)
 
     def observe_load(sid):
         attempted.set()

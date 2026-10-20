@@ -14,20 +14,35 @@ Ordinary draft POSTs never acquire this publication lock.
 ## Request ownership and cost
 
 An ordinary POST validates/coerces the text and attachment list, checks subagent
-ownership, reads fixed-identity ownership metadata, and takes only the draft
-lifecycle lock. It resolves ownership again under that lock before merging a
-partial update. It never acquires the transcript writer lock, calls the full
+ownership, reads fixed-identity ownership metadata, and takes the draft
+lifecycle lock, plus the short compare/publication section described below.
+It resolves ownership again under that lock before merging a partial update.
+It never acquires the transcript writer lock, calls the full
 Session resolver/load, rewrites an existing transcript, or touches its recency
 or index. Equal payloads are no-ops. Draft GET uses the same read-only owner
 resolver, and both methods reject unsafe identifiers with HTTP 400. The atomic
 writer escapes lone Unicode surrogates without changing ordinary UTF-8 output.
 
-Draft authorization is bound to the caller's active profile, captured before
-resolving draft ownership. Both branches reject a foreign durable owner before
-reading its draft, even if the full Session cache still holds a default-profile
-owner. POST revalidates against that same captured profile under the lifecycle
-lock and at every compression successor; GET reads under the lifecycle lock.
-The freshly loaded owner's profile never becomes the request's authority.
+Draft authorization is bound to the caller's active profile, captured at handler
+entry before body processing or the first visibility guard, including cookie-less
+requests that use the process default. The guard and the entire draft branch
+reuse that value. Both branches reject a foreign durable owner before reading
+its draft, even if the full Session cache still holds a default-profile owner.
+POST revalidates against that same profile under the lifecycle lock and at every
+compression successor; GET reads under the lifecycle lock. The freshly loaded
+owner's profile never becomes the request's authority.
+
+The resolver retains the exact durable owner's inode/size/mtime/ctime revision.
+Draft writes prepare and fsync an independent temporary file, then compare that
+revision and replace the draft under a short owner-publication lock shared with
+both indexed and skip-index Session saves. A changed owner returns the generic
+409 without publishing the draft. GET, unchanged and compare-mismatch responses
+also validate their read revision before returning. This is optimistic ordering:
+a save may complete while a draft is reading or fsyncing; it never waits for the
+draft lifecycle, transcript scan, encoding, fsync or HTTP response. The shared
+lock covers only stat/replace and the existing bounded Windows replace retries,
+not index updates or embedded-fallback publication. Missing durable owners fail
+closed; an empty draft for a never-persisted new chat remains a diskless no-op.
 
 The ownership cache retains only eleven metadata fields and is bounded to 128
 file revisions. The path/inode/size/mtime/ctime key invalidates it on replacement

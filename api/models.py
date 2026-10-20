@@ -300,12 +300,33 @@ def _sidecar_write_generation(session_id) -> tuple[int, int]:
     return total, own
 
 
+# Serialize only owner/draft publication, never transcript or draft preparation.
+# Session.save may already own the index lock; nothing below takes that lock,
+# the agent lock, or a draft lifecycle lock while owning this publication lock.
+_DRAFT_OWNER_PUBLICATION_LOCK = threading.Lock()
+
+
 def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
-    _note_sidecar_write(session_id)
-    try:
-        _safe_replace(tmp, path)
-    finally:
+    with _DRAFT_OWNER_PUBLICATION_LOCK:
         _note_sidecar_write(session_id)
+        try:
+            _safe_replace(tmp, path)
+        finally:
+            _note_sidecar_write(session_id)
+
+
+def _draft_owner_revision(session_id):
+    try:
+        stat = (SESSION_DIR / f'{session_id}.json').stat()
+    except FileNotFoundError:
+        return None
+    return (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _draft_owner_is_current(session):
+    """Linearize a draft read against the revision used for authorization."""
+    with _DRAFT_OWNER_PUBLICATION_LOCK:
+        return _draft_owner_revision(session.session_id) == getattr(session, '_draft_owner_revision', None)
 
 
 _EMBEDDED_DRAFT_PUBLICATION_LOCK = threading.Lock()
@@ -406,8 +427,8 @@ def _apply_session_draft_overlay(data: dict, session_id: str) -> dict:
     return data
 
 
-def _save_session_draft(session_id: str, draft) -> None:
-    """Persist a draft payload to the dedicated per-session draft sidecar."""
+def _save_session_draft(session_id: str, draft, *, owner=None) -> bool:
+    """Persist a draft, optionally comparing its authorized owner at publication."""
     if not _normalize_session_id_for_path(session_id):
         raise ValueError(f"Unsafe session_id {session_id!r}; refusing to persist dedicated draft")
     sid = _normalize_session_id_for_path(session_id)
@@ -429,9 +450,20 @@ def _save_session_draft(session_id: str, draft) -> None:
                 f.write(body)
                 f.flush()
                 os.fsync(f.fileno())
-            if not (SESSION_DIR / f"{sid}.json").exists():
-                return
-            _safe_replace(tmp, path)
+            # Encoding, writes and fsync stay outside the publication lock.
+            # An owner save can complete during any of that work; compare again
+            # and replace atomically with respect to both Session.save modes.
+            with _DRAFT_OWNER_PUBLICATION_LOCK:
+                revision = _draft_owner_revision(sid)
+                if revision is None:
+                    # A never-persisted new chat may acknowledge an empty draft
+                    # without creating either file. Deleted durable owners fail.
+                    return (owner is not None and not getattr(owner, '_draft_identity_persisted', False)
+                            and not payload.get('text') and not payload.get('files'))
+                if owner is not None and (owner.session_id != sid or revision != getattr(owner, '_draft_owner_revision', None)):
+                    return False
+                _safe_replace(tmp, path)
+            return True
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
@@ -7021,6 +7053,7 @@ def get_session_for_draft(sid, *, allow_missing_cached=False):
     session = Session(**data)
     session._loaded_metadata_only = True
     session._draft_identity_persisted = True
+    session._draft_owner_revision = signature
     return session
 
 
