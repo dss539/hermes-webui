@@ -22,6 +22,13 @@ or index. Equal payloads are no-ops. Draft GET uses the same read-only owner
 resolver, and both methods reject unsafe identifiers with HTTP 400. The atomic
 writer escapes lone Unicode surrogates without changing ordinary UTF-8 output.
 
+Draft authorization is bound to the caller's active profile, captured before
+resolving draft ownership. Both branches reject a foreign durable owner before
+reading its draft, even if the full Session cache still holds a default-profile
+owner. POST revalidates against that same captured profile under the lifecycle
+lock and at every compression successor; GET reads under the lifecycle lock.
+The freshly loaded owner's profile never becomes the request's authority.
+
 The ownership cache retains only eleven metadata fields and is bounded to 128
 file revisions. The path/inode/size/mtime/ctime key invalidates it on replacement
 or external metadata edits, even when the full session is cached. The read-only
