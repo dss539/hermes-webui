@@ -1,6 +1,5 @@
 """Retained boundary and atomic-persistence contracts for the upstream store."""
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest

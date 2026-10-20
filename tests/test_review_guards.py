@@ -3,8 +3,6 @@ import json
 import os
 import threading
 from contextlib import contextmanager
-from types import SimpleNamespace
-from urllib.parse import urlparse
 import pytest
 from tests.test_composer_draft_sidecar_regressions import _build_draft_env, _post_json
 
