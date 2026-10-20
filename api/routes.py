@@ -18378,6 +18378,20 @@ def handle_post(handler, parsed) -> bool:
         def _draft_mark(name):
             _draft_stages.append((name, _draft_time.monotonic()))
         _draft_mark("enter")
+        # Request authority must not be taken from a newly loaded session owner.
+        request_profile = _get_active_profile_name()
+
+        def _draft_authority_unconfirmed():
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": "Draft authority could not be confirmed",
+                    "code": "draft_authority_unconfirmed",
+                },
+                status=409,
+            )
+
         if handler.command == "GET":
             query = parse_qs(parsed.query)
             sid = query.get("session_id", [""])[0] if parsed.query else ""
@@ -18385,12 +18399,15 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "session_id is required", 400)
             if not is_safe_session_id(sid):
                 return bad(handler, "Invalid session_id", 400)
-            try:
-                s = get_session_for_draft(sid)
-            except KeyError:
-                return bad(handler, "Session not found", 404)
-            draft = getattr(s, "composer_draft", {}) or {}
-            return j(handler, {"draft": draft})
+            with _draft_lifecycle_lock_for_session_id(sid):
+                try:
+                    s = get_session_for_draft(sid)
+                except KeyError:
+                    return bad(handler, "Session not found", 404)
+                if not _profiles_match(getattr(s, "profile", None), request_profile):
+                    return _draft_authority_unconfirmed()
+                draft = getattr(s, "composer_draft", {}) or {}
+                return j(handler, {"draft": draft})
         # POST
         try:
             require(body, "session_id")
@@ -18421,6 +18438,8 @@ def handle_post(handler, parsed) -> bool:
             s = get_session_for_draft(sid, allow_missing_cached=True)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        if not _profiles_match(getattr(s, "profile", None), request_profile):
+            return _draft_authority_unconfirmed()
         if str(getattr(s, 'source_tag', '') or getattr(s, 'raw_source', '')
                or getattr(s, 'session_source', '') or '').strip().lower() == 'subagent':
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
@@ -18431,23 +18450,11 @@ def handle_post(handler, parsed) -> bool:
         unchanged = False
         request_sid = sid
         request_session = s
-        request_profile = getattr(request_session, "profile", None)
         authoritative_sid = request_sid
         _MAX_DRAFT_AUTHORITY_HOPS = 4
         _seen_authority_sids = {authoritative_sid}
         _validated_compression_edges = []
         resolved_once = False
-
-        def _draft_authority_unconfirmed():
-            return j(
-                handler,
-                {
-                    "ok": False,
-                    "error": "Draft authority could not be confirmed",
-                    "code": "draft_authority_unconfirmed",
-                },
-                status=409,
-            )
 
         for _hop in range(_MAX_DRAFT_AUTHORITY_HOPS):
             with ExitStack() as draft_locks:
