@@ -66,3 +66,47 @@ def test_windows_draft_retry_does_not_block_unrelated_owner_save(env, monkeypatc
     print('WINDOWS_BACKOFF_RESULT', json.dumps(actual))
     assert status == 200
     assert blocked == [False], actual
+
+
+def test_windows_owner_retry_preserves_safe_replace_seam_and_bounds_shared_backoff(env, monkeypatch):
+    owner = env.m.Session(session_id='retrying-owner', profile='default')
+    gate = env.m._DRAFT_OWNER_PUBLICATION_GATE
+    real_os, real_time = env.m.os, env.m.time
+    real_replace = env.m._safe_replace
+    calls, attempts, delays = [], [], []
+
+    class OSProxy:
+        name = 'nt'
+
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+        def replace(self, src, dst):
+            if dst == owner.path:
+                attempts.append(True)
+                if len(attempts) < 5:
+                    raise PermissionError('synthetic owner sharing violation')
+            return real_os.replace(src, dst)
+
+    class TimeProxy:
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        def sleep(self, delay):
+            # The compatibility seam holds shared mode, never exclusive mode.
+            assert gate._owners == 1 and not gate._exclusive
+            delays.append(delay)
+
+    def replace(src, dst):
+        calls.append((src, dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(env.m, 'os', OSProxy())
+    monkeypatch.setattr(env.m, 'time', TimeProxy())
+    monkeypatch.setattr(env.m, '_safe_replace', replace)
+    owner.save(touch_updated_at=False, skip_index=True)
+    assert len(calls) == 1 and calls[0][1] == owner.path
+    assert len(attempts) == 5 and delays == [.05, .1, .2, .4]
+    assert owner.path.exists() and gate._owners == 0 and not gate._queue
+    with gate.exclusive():
+        assert gate._exclusive

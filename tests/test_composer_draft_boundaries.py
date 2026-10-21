@@ -47,7 +47,7 @@ def test_atomic_writer_preserves_lone_surrogates_and_ordinary_unicode(tmp_path, 
     assert models._load_session_draft(owner.session_id)['text'] == text
 
 
-@pytest.mark.parametrize('failure', ['fsync', '_safe_replace'])
+@pytest.mark.parametrize('failure', ['fsync', '_replace_with_retry'])
 def test_atomic_failure_keeps_previous_draft_and_removes_temporary_file(tmp_path, monkeypatch, failure):
     models, routes, _, owner = seed(tmp_path, monkeypatch)
     models._save_session_draft(owner.session_id, {'text': 'durable'})

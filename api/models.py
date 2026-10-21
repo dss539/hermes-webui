@@ -243,20 +243,23 @@ _WINDOWS_REPLACE_MAX_RETRIES = 5
 _WINDOWS_REPLACE_INITIAL_DELAY = 0.05  # 50 ms
 
 
-def _safe_replace(src: Path, dst: Path, *, publish=None):
-    """Retry a single publication attempt; never retain its locks in backoff.
+def _safe_replace(src: Path, dst: Path) -> None:
+    """Atomic replace with retries on Windows file-locking errors."""
+    _replace_with_retry(src, dst, os.replace)
 
-    A guarded publisher compares and replaces under its lock on every attempt.
-    False means the condition no longer holds, not a Windows sharing violation.
+
+def _replace_with_retry(src: Path, dst: Path, publish):
+    """Retry publication callbacks; guarded callbacks release before backoff.
+
+    False means the publication condition failed, not a sharing violation.
     """
-    replace = os.replace if publish is None else publish
     if os.name != 'nt':
-        return replace(src, dst)
+        return publish(src, dst)
 
     delay = _WINDOWS_REPLACE_INITIAL_DELAY
     for attempt in range(_WINDOWS_REPLACE_MAX_RETRIES):
         try:
-            return replace(src, dst)
+            return publish(src, dst)
         except PermissionError:
             if attempt == _WINDOWS_REPLACE_MAX_RETRIES - 1:
                 raise
@@ -374,10 +377,15 @@ def _replace_session_sidecar(tmp: Path, path: Path, session_id, *, only_if_absen
                 return False
             _note_sidecar_write(session_id)
             try:
-                os.replace(src, dst)
+                # Preserve the two-argument owner replacement seam. Its bounded
+                # Windows backoff retains shared mode, never exclusive mode.
+                replace = os.replace if only_if_absent else _safe_replace
+                replace(src, dst)
             finally:
                 _note_sidecar_write(session_id)
-    return _safe_replace(tmp, path, publish=publish)
+    if only_if_absent:
+        return _replace_with_retry(tmp, path, publish)
+    return publish(tmp, path)
 
 
 def _draft_owner_revision(session_id):
@@ -537,7 +545,7 @@ def _save_session_draft(session_id: str, draft, *, owner=None) -> bool:
                         return False
                     os.replace(src, dst)
                     return True
-            return _safe_replace(tmp, path, publish=publish)
+            return _replace_with_retry(tmp, path, publish)
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)

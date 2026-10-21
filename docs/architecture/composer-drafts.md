@@ -49,9 +49,14 @@ generic 409 without publishing. GET validates its read revision before returning
 POST unchanged and compare-mismatch results retry a changed revision too. This is
 optimistic ordering: a save may complete while a draft is reading or fsyncing;
 it never waits for the draft lifecycle, transcript scan, encoding, fsync or HTTP
-response. The shared lock covers stat/replace only, not index updates, embedded
-fallback publication, or Windows backoff. Each Windows replacement attempt
-reacquires the lock and revalidates its condition after sleeping outside it.
+response. The gate covers publication, not index updates or embedded
+fallback publication. Guarded draft and first-shell replacements reacquire the
+gate and revalidate their condition for each Windows retry, sleeping outside it.
+Ordinary owner replacements preserve the two-argument `_safe_replace` seam and
+hold shared mode through its Windows retry loop: at most five attempts with
+50/100/200/400 ms delays (750 ms total requested backoff, excluding filesystem
+latency). Other admitted shared owners may still run; exclusive waiters, and new
+shared tickets queued behind them, wait for that owner to finish.
 Missing durable owners fail closed; an empty draft for a never-persisted new chat
 remains a diskless no-op.
 
