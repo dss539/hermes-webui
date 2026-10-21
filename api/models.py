@@ -364,8 +364,10 @@ class _DraftOwnerPublicationGate:
                 self._condition.notify_all()
 
 
-# Only publication, never preparation/backoff. Callers may own index/lifecycle
-# locks; gate holders must not acquire either, nor cache or agent locks.
+# Publication only: preparation and guarded-publisher backoff stay outside, but
+# ordinary owner saves keep shared mode through _safe_replace's bounded Windows
+# retry. Callers may own index/lifecycle locks; holders never take those, cache
+# or agent locks.
 _DRAFT_OWNER_PUBLICATION_GATE = _DraftOwnerPublicationGate()
 
 
