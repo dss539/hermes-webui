@@ -3449,6 +3449,8 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
       try{ viewport.setPointerCapture(e.pointerId); }catch(_){}
     }
     if(e.preventDefault) e.preventDefault();
+    // Admit tap/swipe only after the native engine accepted this pointer.
+    _imgTapStart(e);
   }
 
   function _imgOnPointerMove(e) {
@@ -3503,6 +3505,10 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
       state.dragged = true;
       _closeImgLightbox(lb);
     }
+    // The ownership guards above also govern the added recognizer. A foreign
+    // release/cancel must neither navigate nor invalidate the active press.
+    if(e && e.type === 'pointerup') _imgTapEnd(e);
+    if(e && e.type === 'pointercancel'){ touchPress = null; lastTap = null; }
   }
 
   // A navigation swaps the image under an in-flight pan. The old gesture's
@@ -3885,9 +3891,6 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
   }
   function _imgModalTouchMove(e) { e.preventDefault(); }
   const extraListeners = [
-    [viewport,'pointerdown',_imgTapStart,false],
-    [viewport,'pointerup',_imgTapEnd,false],
-    [viewport,'pointercancel',_imgCancelGesture,false],
     [viewport,'dblclick',_imgDoubleClick,false],
     ...['touchstart','touchend','touchcancel'].map(type=>[lb,type,_imgTouchOwnership,{capture:true,passive:true}]),
     ...['gesturestart','gesturechange','gestureend'].map(type=>[lb,type,_imgSafariGesture,{passive:false}]),

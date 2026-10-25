@@ -18,5 +18,6 @@ if __name__ == '__main__':
         'tests/test_img_lightbox_gestures_behavior.py',
         'tests/test_img_lightbox_gestures_composed.py',
         'tests/test_img_lightbox_local_inputs.py',
+        'tests/test_img_lightbox_pointer_ownership.py',
         *sys.argv[1:],
     ], cwd=ROOT))
