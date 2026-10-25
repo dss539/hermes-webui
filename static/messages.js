@@ -4570,7 +4570,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }else{
       for(let i=messages.length-1;i>=0;i--){
         const candidate=messages[i];
-        if(candidate&&candidate.role==='assistant'){
+        if(candidate&&candidate.role==='assistant'&&!_streamRecoveryControlMessage(candidate)){
           lastAsst=candidate;
           lastAsstIndex=i;
           break;
@@ -7266,7 +7266,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           } else if(d.session){
             S.messages=_carryForwardEphemeralTurnFields(_currentTerminalMessages,completedSession.messages||[]);
           }
-          if(_mergedTerminalSession){
+          if(_mergedTerminalSession&&completedSession.messages.length){
             if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!completedSession._messages_truncated;
             if(typeof _oldestIdx!=='undefined')_oldestIdx=completedSession._messages_offset||0;
           }
@@ -7308,7 +7308,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
           lastAsst=_mergedTerminalSession
-            ? [...S.messages].reverse().find(m=>m.role==='assistant')
+            ? [...S.messages].reverse().find(m=>m.role==='assistant'&&!_streamRecoveryControlMessage(m))
             : (_ownsCurrentTerminalStream&&_localTerminalAssistantIndex>=0
               ? S.messages[_localTerminalAssistantIndex]
               : null);
@@ -8193,7 +8193,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const tail=answer.slice(-160);
     const list=Array.isArray(messages)?messages:[];
     for(const m of list){
-      if(!m||m.role!=='assistant') continue;
+      if(!m||m.role!=='assistant'||_streamRecoveryControlMessage(m)) continue;
       let c=m.content;
       if(Array.isArray(c)) c=c.map(p=>(p&&typeof p==='object')?((p.text||p.input_text||'')||''):(p||'')).join('');
       c=String(c||'').trim();
@@ -8225,10 +8225,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     for(let i=list.length-1;i>=0;i--){
       const m=list[i];
       if(!m) continue;
+      // Retain recovery placeholders in raw coordinates, but do not treat them as turn boundaries.
+      if(_streamRecoveryControlMessage(m)) continue;
       if(m.role==='user') return false;            // crossed into the prior turn: no assistant row this turn
       if(m.role!=='assistant') continue;            // skip tool / other rows
       // m is the last assistant row of the current turn — decide usability.
-      if(_streamRecoveryControlMessage(m)) return false;
       if(_isMarkerOnlyAssistantMessage(m)) return false;
       if(typeof _isTerminalStreamErrorMarkerMessage==='function'&&_isTerminalStreamErrorMarkerMessage(m)) return false;
       let c=m.content;

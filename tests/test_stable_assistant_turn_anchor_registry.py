@@ -855,8 +855,12 @@ def test_side_effect_only_scene_is_persisted_without_creating_a_worklog():
     attach_scene = _function_body(
         messages_js, "_attachProjectedAnchorSceneToLastAssistant"
     )
+    recovery_text = _function_body(messages_js, "_streamRecoveryControlMessageText")
+    recovery_control = _function_body(messages_js, "_streamRecoveryControlMessage(")
     script = f"""
 const activeSid='sid-owned-outcome';
+function _streamRecoveryControlMessageText(text){{{recovery_text}}}
+function _streamRecoveryControlMessage(m){{{recovery_control}}}
 const streamId='stream-owned-outcome';
 const _anchorRegistry={{}};
 let persisted=0;
