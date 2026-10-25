@@ -374,6 +374,15 @@ def _build_csp_report_only_policy(
     )
 
 
+def _send_reporting_headers(handler):
+    """Advertise CSP and tab-crash reports at the existing collector."""
+    handler.send_header("Report-To", handler._CSP_REPORT_TO)
+    handler.send_header(
+        "Reporting-Endpoints",
+        'csp-endpoint="/api/csp-report", crash-reporting="/api/csp-report"',
+    )
+
+
 def _security_headers(handler):
     """Add security headers to every response."""
     extra_connect_src = _csp_extra_connect_src()
