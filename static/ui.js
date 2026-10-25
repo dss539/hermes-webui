@@ -3522,6 +3522,9 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
   // viewport straight to the backdrop and dismissed the dialog, bypassing the
   // drag/click guard (greptile review of #6896, 2026-10-06).
   function _imgCancelGesture() {
+    safariGesture = null;
+    touchPress = null;
+    lastTap = null;
     // A two-finger pinch keeps pinching/pinchStart* alive and only clears
     // dragging (_imgOnTouchStart calls _imgEndPointerDrag), so the drag-only
     // early return below used to let an in-flight zoom outlive a navigation.
@@ -3811,6 +3814,93 @@ function _mountImgLightboxZoom(viewport, canvas, img, lb) {
     }, 120);
   }
 
+  // Image-only input additions. Keep the upstream geometry, fit and navigation
+  // contracts; Mermaid never installs these listeners.
+  let safariGesture = null;
+  let touchesDown = 0;
+  let touchPress = null;
+  let lastTap = null;
+  function _imgToggleZoom(x, y) {
+    _imgCancelGesture();
+    if(Math.abs(state.scale - state.fitScale) > 1e-9) _fit();
+    else {
+      const rect = viewport.getBoundingClientRect();
+      _imgSetScale(state.fitScale < 1 ? 1 : 2, x - rect.left, y - rect.top);
+    }
+  }
+  function _imgTouchOwnership(e) {
+    touchesDown = e.touches.length;
+    if(touchesDown > 1 || e.type === 'touchcancel'){
+      touchPress = null;
+      lastTap = null;
+    }
+    if(touchesDown || e.type === 'touchcancel') safariGesture = null;
+  }
+  function _imgTapStart(e) {
+    if(e.pointerType !== 'touch') return;
+    if(touchPress || state.pinching){ touchPress = null; lastTap = null; return; }
+    touchPress = {id:e.pointerId, x:e.clientX, y:e.clientY, atFit:Math.abs(state.scale-state.fitScale)<1e-9};
+  }
+  function _imgTapEnd(e) {
+    const press = touchPress;
+    if(!press || e.pointerId !== press.id) return;
+    touchPress = null;
+    const dx=e.clientX-press.x, dy=e.clientY-press.y;
+    if(Math.abs(dx)>50 && Math.abs(dx)>Math.abs(dy)*1.5 && press.atFit && Math.abs(state.scale-state.fitScale)<1e-9){
+      lastTap = null;
+      _navigateLightbox(lb, dx<0 ? 1 : -1);
+    } else if(!state.dragged && Math.abs(dx)+Math.abs(dy)<=10 && _imgPointOnCanvas(e.clientX,e.clientY)){
+      const now = Date.now();
+      if(lastTap && now-lastTap.time<300 && Math.hypot(e.clientX-lastTap.x,e.clientY-lastTap.y)<24){
+        _imgToggleZoom(e.clientX,e.clientY);
+      } else lastTap = {time:now,x:e.clientX,y:e.clientY};
+    } else lastTap = null;
+  }
+  function _imgDoubleClick(e) {
+    if(e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+    e.preventDefault();
+    _imgToggleZoom(e.clientX,e.clientY);
+  }
+  function _imgSafariGesture(e) {
+    e.preventDefault();
+    if(touchesDown || state.pinching || e.type==='gestureend'){ safariGesture=null; return; }
+    const scale=Number(e.scale);
+    if(!Number.isFinite(scale) || scale<=0) return;
+    if(e.type==='gesturestart'){
+      _imgCancelGesture();
+      const rect=viewport.getBoundingClientRect();
+      const size=_imgViewportSize();
+      safariGesture={eventScale:scale,scale:state.scale,x:state.x,y:state.y,
+        cx:Number.isFinite(e.clientX)?e.clientX-rect.left:size.width/2,
+        cy:Number.isFinite(e.clientY)?e.clientY-rect.top:size.height/2};
+    } else if(safariGesture){
+      const start=safariGesture;
+      state.scale=start.scale; state.x=start.x; state.y=start.y;
+      _imgSetScale(start.scale*scale/start.eventScale,start.cx,start.cy);
+    }
+  }
+  function _imgModalWheel(e) {
+    if(!viewport.contains(e.target)) _imgZoomFromWheel(e);
+    e.preventDefault();
+  }
+  function _imgModalTouchMove(e) { e.preventDefault(); }
+  const extraListeners = [
+    [viewport,'pointerdown',_imgTapStart,false],
+    [viewport,'pointerup',_imgTapEnd,false],
+    [viewport,'pointercancel',_imgCancelGesture,false],
+    [viewport,'dblclick',_imgDoubleClick,false],
+    ...['touchstart','touchend','touchcancel'].map(type=>[lb,type,_imgTouchOwnership,{capture:true,passive:true}]),
+    ...['gesturestart','gesturechange','gestureend'].map(type=>[lb,type,_imgSafariGesture,{passive:false}]),
+    [lb,'wheel',_imgModalWheel,{passive:false}],
+    [lb,'touchmove',_imgModalTouchMove,{passive:false}],
+  ];
+  for(const [target,type,handler,options] of extraListeners) target.addEventListener(type,handler,options);
+  state.dispose = () => {
+    _imgCancelGesture();
+    for(const [target,type,handler,options] of extraListeners) target.removeEventListener(type,handler,options);
+    img.onload = img.onerror = null;
+  };
+
   viewport.onpointerdown = _imgOnPointerDown;
   viewport.onpointermove = _imgOnPointerMove;
   viewport.onpointerup = _imgEndPointerDrag;
@@ -4019,6 +4109,7 @@ function _navigateLightbox(lb, direction) {
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
   document.removeEventListener('keydown', lb._keyHandler);
+  if(lb._zoom && lb._zoom.dispose) lb._zoom.dispose();
   // Hand focus back to whatever was focused before the dialog opened — the
   // lightbox moved focus into itself on open (see _openImgLightboxWithNav).
   if(lb._restoreFocus && typeof lb._restoreFocus.focus === 'function' &&
