@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 
 import api.models as models
-import api.routes as routes
 from api.models import SESSIONS, Session
 from tests.test_session_effort_master_compose import _isolate_session_store, _post
 
